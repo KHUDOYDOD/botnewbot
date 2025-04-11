@@ -161,6 +161,21 @@ def get_all_users():
     except Exception as e:
         logger.error(f"Error getting all users: {e}")
         return []
+        
+def get_approved_user_ids():
+    """Получить ID всех подтвержденных пользователей для рассылки."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT user_id
+                    FROM users
+                    WHERE is_approved = TRUE
+                """)
+                return [row[0] for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"Error getting approved user IDs: {e}")
+        return []
 
 def get_pending_users():
     """Получить всех пользователей, ожидающих одобрения."""

@@ -19,7 +19,7 @@ from datetime import datetime
 from models import (
     add_user, get_user, approve_user, verify_user_password, update_user_language,
     get_all_users, get_pending_users, delete_user, set_user_admin_status,
-    create_admin_user, ADMIN_USERNAME, ADMIN_PASSWORD_HASH
+    create_admin_user, get_approved_user_ids, ADMIN_USERNAME, ADMIN_PASSWORD_HASH
 )
 from keep_alive import keep_alive
 
@@ -34,7 +34,7 @@ PENDING_USERS = {}
 logger = logging.getLogger(__name__)
 
 # Состояния для админа
-ADMIN_PASSWORD, ADMIN_MENU, ADMIN_USER_MANAGEMENT = range(3)
+ADMIN_PASSWORD, ADMIN_MENU, ADMIN_USER_MANAGEMENT, ADMIN_BROADCAST_MESSAGE = range(4)
 
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
@@ -134,20 +134,76 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if approve_user(user_id, password_hash):
             del PENDING_USERS[user_id]
+            
+            # Получаем информацию о языке пользователя
+            user_data = get_user(user_id)
+            lang_code = user_data['language_code'] if user_data and 'language_code' in user_data else 'tg'
+            
+            # Сообщения об одобрении на разных языках
+            approval_messages = {
+                'tg': f"✅ Дархости шумо қабул карда шуд!\n\nРамзи шумо барои ворид шудан: `{password}`\n\nЛутфан, онро нигоҳ доред.",
+                'ru': f"✅ Ваша заявка одобрена!\n\nВаш пароль для входа: `{password}`\n\nПожалуйста, сохраните его.",
+                'uz': f"✅ Arizangiz tasdiqlandi!\n\nKirish uchun parolingiz: `{password}`\n\nIltimos, uni saqlab qoling.",
+                'kk': f"✅ Өтінішіңіз мақұлданды!\n\nКіру үшін құпия сөзіңіз: `{password}`\n\nОны сақтап қойыңыз.",
+                'en': f"✅ Your request has been approved!\n\nYour password: `{password}`\n\nPlease save it."
+            }
+            
+            # Тексты кнопок на разных языках
+            button_texts = {
+                'tg': "🚀 Ба бот ворид шавед",
+                'ru': "🚀 Войти в бот",
+                'uz': "🚀 Botga kirish",
+                'kk': "🚀 Ботқа кіру",
+                'en': "🚀 Enter the bot"
+            }
+            
+            # Выбираем сообщение и текст кнопки согласно языку пользователя
+            message = approval_messages.get(lang_code, approval_messages['tg'])
+            button_text = button_texts.get(lang_code, button_texts['tg'])
+            
+            # Создаем клавиатуру с кнопкой для входа
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton(button_text, callback_data="return_to_main")]
+            ])
+            
+            # Отправляем сообщение пользователю
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"✅ Ваша заявка одобрена!\n\nВаш пароль для входа: `{password}`\n\nПожалуйста, сохраните его.",
-                parse_mode='MarkdownV2'
+                text=message,
+                parse_mode='MarkdownV2',
+                reply_markup=keyboard
             )
+            
+            # Уведомляем администратора
             await query.edit_message_text(f"✅ Пользователь @{user_info['username']} одобрен")
         else:
             await query.edit_message_text("❌ Ошибка при одобрении пользователя")
     else:
         del PENDING_USERS[user_id]
+        
+        # Получаем информацию о языке пользователя
+        user_data = get_user(user_id)
+        lang_code = user_data['language_code'] if user_data and 'language_code' in user_data else 'tg'
+        
+        # Сообщения об отклонении на разных языках
+        rejection_messages = {
+            'tg': "❌ Дархости шумо радд карда шуд.",
+            'ru': "❌ Ваша заявка отклонена администратором.",
+            'uz': "❌ Arizangiz administrator tomonidan rad etildi.",
+            'kk': "❌ Сіздің өтінішіңіз әкімші тарапынан қабылданбады.",
+            'en': "❌ Your request has been rejected by the administrator."
+        }
+        
+        # Выбираем сообщение согласно языку пользователя
+        message = rejection_messages.get(lang_code, rejection_messages['tg'])
+        
+        # Отправляем сообщение пользователю
         await context.bot.send_message(
             chat_id=user_id,
-            text="❌ Ваша заявка отклонена администратором."
+            text=message
         )
+        
+        # Уведомляем администратора
         await query.edit_message_text(f"❌ Пользователь @{user_info['username']} отклонен")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -223,10 +279,35 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     try:
+        # Проверка доступа на уровне всех действий
+        user_id = update.effective_user.id
+        user_data = get_user(user_id)
+        is_admin = update.effective_user.username and update.effective_user.username.lower() == ADMIN_USERNAME.lower()
+        is_approved = user_data and user_data.get('is_approved')
+        
+        # Разрешаем некоторые действия даже для неавторизованных пользователей
+        allowed_for_all = [
+            "send_request",
+            "return_to_main",
+            "change_language",
+        ]
+        is_allowed_action = query.data in allowed_for_all or query.data.startswith('lang_')
+        
+        # Проверка доступа
+        if not (is_approved or is_admin or is_allowed_action):
+            register_keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📝 Отправить заявку", callback_data="send_request")
+            ]])
+            
+            await query.edit_message_text(
+                "⚠️ У вас нет доступа к этой функции.\n\n"
+                "Для получения доступа к боту необходимо отправить заявку на регистрацию.",
+                reply_markup=register_keyboard
+            )
+            return
+            
         # Handle "Return to Main" button
         if query.data == "return_to_main":
-            user_id = update.effective_user.id
-            user_data = get_user(user_id)
             lang_code = user_data['language_code'] if user_data else 'tg'
 
             keyboard = get_currency_keyboard(current_lang=lang_code)
@@ -268,12 +349,32 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'timestamp': datetime.now()
             }
             
-            # Отправляем сообщение пользователю
-            await query.edit_message_text(
-                "📝 Ваша заявка отправлена администратору. "
-                "Пожалуйста, ожидайте подтверждения. "
-                "Вы получите уведомление, когда ваша заявка будет рассмотрена."
-            )
+            # Получаем язык пользователя
+            user_data = get_user(user_id)
+            lang_code = user_data['language_code'] if user_data and 'language_code' in user_data else 'tg'
+            
+            # Сообщения о заявке на разных языках
+            request_messages = {
+                'tg': "📝 Дархости шумо ба маъмур фиристода шуд. "
+                      "Лутфан, тасдиқро интизор шавед. "
+                      "Вақте ки дархости шумо баррасӣ мешавад, шумо огоҳинома мегиред.",
+                'ru': "📝 Ваша заявка отправлена администратору. "
+                      "Пожалуйста, ожидайте подтверждения. "
+                      "Вы получите уведомление, когда ваша заявка будет рассмотрена.",
+                'uz': "📝 Arizangiz administratorga yuborildi. "
+                      "Iltimos, tasdiqlashni kuting. "
+                      "Arizangiz ko'rib chiqilganda, sizga xabar beriladi.",
+                'kk': "📝 Сіздің өтінішіңіз әкімшіге жіберілді. "
+                      "Растауды күтіңіз. "
+                      "Өтінішіңіз қаралғанда, сізге хабарлама жіберіледі.",
+                'en': "📝 Your request has been sent to the administrator. "
+                      "Please wait for confirmation. "
+                      "You will receive a notification when your request is reviewed."
+            }
+            
+            # Отправляем сообщение пользователю на его языке
+            message = request_messages.get(lang_code, request_messages['tg'])
+            await query.edit_message_text(message)
             
             # Получаем чат администратора и отправляем ему уведомление
             admin_chat_id = await get_admin_chat_id(context.bot)
@@ -303,31 +404,11 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer()
             return
 
-        # Get user data
-        user_id = update.effective_user.id
-        user_data = get_user(user_id)
-
+        # Получаем данные пользователя, если нужно
         if not user_data:
             add_user(user_id, update.effective_user.username)
             user_data = get_user(user_id)
         
-        # Проверяем, одобрен ли пользователь
-        is_admin = update.effective_user.username and update.effective_user.username.lower() == ADMIN_USERNAME.lower()
-        is_approved = user_data and user_data.get('is_approved')
-        
-        if not is_approved and not is_admin:
-            # Если не одобрен и не админ - предлагаем зарегистрироваться
-            register_keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("📝 Отправить заявку", callback_data="send_request")
-            ]])
-            
-            await query.edit_message_text(
-                "⚠️ У вас нет доступа к этой функции.\n\n"
-                "Для получения доступа к боту необходимо отправить заявку на регистрацию.",
-                reply_markup=register_keyboard
-            )
-            return
-
         lang_code = user_data['language_code'] if user_data else 'tg'
         logger.info(f"Current language for user {user_id}: {lang_code}")
 
@@ -345,6 +426,19 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.message.edit_text(msg, reply_markup=keyboard)
             except Exception as e:
                 logger.error(f"Error showing language selection: {e}")
+            return
+
+        # Обрабатываем запросы на анализ рынка только для авторизованных пользователей
+        if not (is_approved or is_admin):
+            register_keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("📝 Отправить заявку", callback_data="send_request")
+            ]])
+            
+            await query.edit_message_text(
+                "⚠️ У вас нет доступа к анализу рынка.\n\n"
+                "Для получения доступа к боту необходимо отправить заявку на регистрацию.",
+                reply_markup=register_keyboard
+            )
             return
 
         pair = query.data
@@ -399,6 +493,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Button click error: {str(e)}")
+        lang_code = 'tg'  # Используем язык по умолчанию в случае ошибки
         await query.message.reply_text(MESSAGES[lang_code]['ERRORS']['GENERAL_ERROR'])
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -418,6 +513,7 @@ def get_admin_keyboard():
     """Создать клавиатуру админ-панели"""
     keyboard = [
         [InlineKeyboardButton("👥 Управление пользователями", callback_data="admin_users")],
+        [InlineKeyboardButton("📨 Рассылка сообщений", callback_data="admin_broadcast")],
         [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
         [InlineKeyboardButton("🔄 Обновить базу данных", callback_data="admin_update_db")],
         [InlineKeyboardButton("🌐 Сменить язык", callback_data="change_language")]
@@ -540,6 +636,19 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return ADMIN_USER_MANAGEMENT
     
+    elif action == "admin_broadcast":
+        # Переход в режим рассылки сообщений
+        keyboard = [
+            [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+        ]
+        
+        await query.edit_message_text(
+            "📨 Рассылка сообщений\n\n"
+            "Введите текст сообщения, которое будет отправлено всем подтвержденным пользователям:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ADMIN_BROADCAST_MESSAGE
+    
     elif action == "admin_stats":
         # Показать статистику
         users = get_all_users()
@@ -587,6 +696,14 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return ADMIN_MENU
     
+    elif action == "admin_back":
+        # Вернуться в главное меню админа
+        await query.edit_message_text(
+            "👑 Панель администратора",
+            reply_markup=get_admin_keyboard()
+        )
+        return ADMIN_MENU
+    
     else:
         # Неизвестное действие
         await query.edit_message_text(
@@ -594,6 +711,66 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=get_admin_keyboard()
         )
         return ADMIN_MENU
+
+async def admin_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ввода текста для рассылки сообщений"""
+    if update.message:
+        # Обработка текста рассылки
+        broadcast_text = update.message.text
+        approved_user_ids = get_approved_user_ids()
+        
+        success_count = 0
+        error_count = 0
+        
+        progress_message = await update.message.reply_text(
+            "📨 Начинаю рассылку сообщений...\n"
+            "0% выполнено (0/" + str(len(approved_user_ids)) + ")"
+        )
+        
+        # Рассылка сообщений всем подтвержденным пользователям
+        for i, user_id in enumerate(approved_user_ids):
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"📢 Сообщение от администратора:\n\n{broadcast_text}"
+                )
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Ошибка при отправке сообщения пользователю {user_id}: {e}")
+                error_count += 1
+            
+            # Обновляем прогресс каждые 5 пользователей или в конце списка
+            if (i + 1) % 5 == 0 or i == len(approved_user_ids) - 1:
+                progress_percent = int((i + 1) / len(approved_user_ids) * 100)
+                await progress_message.edit_text(
+                    f"📨 Выполняется рассылка сообщений...\n"
+                    f"{progress_percent}% выполнено ({i+1}/{len(approved_user_ids)})"
+                )
+        
+        # Отправляем итоговый отчет
+        await update.message.reply_text(
+            f"✅ Рассылка завершена!\n\n"
+            f"📊 Статистика:\n"
+            f"✓ Успешно отправлено: {success_count}\n"
+            f"❌ Ошибок: {error_count}\n"
+            f"📝 Всего пользователей: {len(approved_user_ids)}",
+            reply_markup=get_admin_keyboard()
+        )
+        return ADMIN_MENU
+    
+    elif update.callback_query:
+        # Обработка нажатия кнопки "Назад"
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == "admin_back":
+            await query.edit_message_text(
+                "👑 Панель администратора",
+                reply_markup=get_admin_keyboard()
+            )
+            return ADMIN_MENU
+    
+    return ADMIN_BROADCAST_MESSAGE
 
 async def admin_user_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик меню управления пользователями"""
@@ -822,6 +999,10 @@ def main():
                     ADMIN_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_check_password)],
                     ADMIN_MENU: [CallbackQueryHandler(admin_menu_handler)],
                     ADMIN_USER_MANAGEMENT: [CallbackQueryHandler(admin_user_management)],
+                    ADMIN_BROADCAST_MESSAGE: [
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_message),
+                        CallbackQueryHandler(admin_broadcast_message)
+                    ],
                 },
                 fallbacks=[CommandHandler("start", start)]
             )
