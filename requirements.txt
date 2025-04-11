@@ -31,3 +31,7 @@ requests
 seaborn
 telegram
 yfinance
+pillow
+matplotlib
+numpy
+pillow

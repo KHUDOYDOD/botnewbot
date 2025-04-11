@@ -17,6 +17,7 @@ def get_db_connection():
 def init_db():
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Таблица пользователей
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
@@ -28,6 +29,32 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            
+            # Таблица для хранения валютных пар
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS currency_pairs (
+                    id SERIAL PRIMARY KEY,
+                    pair_code VARCHAR(20) UNIQUE NOT NULL,
+                    symbol VARCHAR(20) NOT NULL,
+                    display_name VARCHAR(255) NOT NULL,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Таблица для хранения текстов и сообщений
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS bot_messages (
+                    id SERIAL PRIMARY KEY,
+                    message_key VARCHAR(50) NOT NULL,
+                    language_code VARCHAR(10) NOT NULL,
+                    message_text TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (message_key, language_code)
+                )
+            """)
+            
             conn.commit()
 
 def add_user(user_id: int, username: str = "", is_admin: bool = False):
@@ -200,6 +227,23 @@ def get_pending_users():
         logger.error(f"Error getting pending users: {e}")
         return []
 
+def reset_user_approval(user_id: int):
+    """Сбросить статус подтверждения пользователя, но оставить его в базе."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE users
+                    SET is_approved = FALSE, password_hash = NULL
+                    WHERE user_id = %s AND is_admin = FALSE
+                    RETURNING user_id
+                """, (user_id,))
+                conn.commit()
+                return cur.fetchone() is not None
+    except Exception as e:
+        logger.error(f"Error resetting user approval status: {e}")
+        return False
+
 def delete_user(user_id: int):
     """Удалить пользователя из базы данных."""
     try:
@@ -254,5 +298,216 @@ def create_admin_user(user_id: int, username: str):
         logger.error(f"Error creating admin user: {e}")
         return False
 
+# Функции для управления валютными парами
+def get_all_currency_pairs():
+    """Получить все валютные пары из базы данных."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, pair_code, symbol, display_name, is_active
+                    FROM currency_pairs
+                    ORDER BY id
+                """)
+                pairs = []
+                for row in cur.fetchall():
+                    pairs.append({
+                        'id': row[0],
+                        'pair_code': row[1],
+                        'symbol': row[2],
+                        'display_name': row[3],
+                        'is_active': row[4]
+                    })
+                return pairs
+    except Exception as e:
+        logger.error(f"Error getting currency pairs: {e}")
+        return []
+
+def add_or_update_currency_pair(pair_code: str, symbol: str, display_name: str, is_active: bool = True):
+    """Добавить или обновить валютную пару."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO currency_pairs (pair_code, symbol, display_name, is_active)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (pair_code) DO UPDATE
+                    SET symbol = EXCLUDED.symbol,
+                        display_name = EXCLUDED.display_name,
+                        is_active = EXCLUDED.is_active
+                    RETURNING id
+                """, (pair_code, symbol, display_name, is_active))
+                conn.commit()
+                return cur.fetchone()[0]
+    except Exception as e:
+        logger.error(f"Error adding/updating currency pair: {e}")
+        return None
+
+def delete_currency_pair(pair_code: str):
+    """Удалить валютную пару."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM currency_pairs
+                    WHERE pair_code = %s
+                    RETURNING id
+                """, (pair_code,))
+                conn.commit()
+                return cur.fetchone() is not None
+    except Exception as e:
+        logger.error(f"Error deleting currency pair: {e}")
+        return False
+
+def update_currency_pair_status(pair_code: str, is_active: bool):
+    """Обновить статус активности валютной пары."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE currency_pairs
+                    SET is_active = %s
+                    WHERE pair_code = %s
+                    RETURNING id
+                """, (is_active, pair_code))
+                conn.commit()
+                return cur.fetchone() is not None
+    except Exception as e:
+        logger.error(f"Error updating currency pair status: {e}")
+        return False
+
+
+# Функции для управления сообщениями бота
+def get_all_bot_messages():
+    """Получить все сообщения бота из базы данных."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, message_key, language_code, message_text, updated_at
+                    FROM bot_messages
+                    ORDER BY message_key, language_code
+                """)
+                messages = []
+                for row in cur.fetchall():
+                    messages.append({
+                        'id': row[0],
+                        'message_key': row[1],
+                        'language_code': row[2],
+                        'message_text': row[3],
+                        'updated_at': row[4]
+                    })
+                return messages
+    except Exception as e:
+        logger.error(f"Error getting bot messages: {e}")
+        return []
+
+def get_bot_message(message_key: str, language_code: str):
+    """Получить конкретное сообщение бота."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT message_text
+                    FROM bot_messages
+                    WHERE message_key = %s AND language_code = %s
+                """, (message_key, language_code))
+                result = cur.fetchone()
+                return result[0] if result else None
+    except Exception as e:
+        logger.error(f"Error getting bot message: {e}")
+        return None
+
+def update_bot_message(message_key: str, language_code: str, message_text: str):
+    """Обновить или добавить сообщение бота."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO bot_messages (message_key, language_code, message_text, updated_at)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (message_key, language_code) DO UPDATE
+                    SET message_text = EXCLUDED.message_text,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING id
+                """, (message_key, language_code, message_text))
+                conn.commit()
+                return cur.fetchone()[0]
+    except Exception as e:
+        logger.error(f"Error updating bot message: {e}")
+        return None
+
+def delete_bot_message(message_key: str, language_code: str):
+    """Удалить сообщение бота."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    DELETE FROM bot_messages
+                    WHERE message_key = %s AND language_code = %s
+                    RETURNING id
+                """, (message_key, language_code))
+                conn.commit()
+                return cur.fetchone() is not None
+    except Exception as e:
+        logger.error(f"Error deleting bot message: {e}")
+        return False
+
+def get_message_keys():
+    """Получить список уникальных ключей сообщений."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT DISTINCT message_key
+                    FROM bot_messages
+                    ORDER BY message_key
+                """)
+                return [row[0] for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"Error getting message keys: {e}")
+        return []
+
+def import_default_currency_pairs():
+    """Импортировать валютные пары по умолчанию, если таблица пуста."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Проверяем, пуста ли таблица
+                cur.execute("SELECT COUNT(*) FROM currency_pairs")
+                count = cur.fetchone()[0]
+                if count == 0:
+                    # Добавляем стандартные валютные пары
+                    default_pairs = [
+                        ("EURUSD", "EURUSD=X", "EUR/USD"),
+                        ("GBPUSD", "GBPUSD=X", "GBP/USD"),
+                        ("USDJPY", "USDJPY=X", "USD/JPY"),
+                        ("USDCHF", "USDCHF=X", "USD/CHF"),
+                        ("AUDUSD", "AUDUSD=X", "AUD/USD"),
+                        ("USDCAD", "USDCAD=X", "USD/CAD"),
+                        ("NZDUSD", "NZDUSD=X", "NZD/USD"),
+                        ("EURGBP", "EURGBP=X", "EUR/GBP"),
+                        ("EURCHF", "EURCHF=X", "EUR/CHF"),
+                        ("EURJPY", "EURJPY=X", "EUR/JPY")
+                    ]
+                    
+                    for pair in default_pairs:
+                        cur.execute("""
+                            INSERT INTO currency_pairs (pair_code, symbol, display_name, is_active)
+                            VALUES (%s, %s, %s, TRUE)
+                            ON CONFLICT (pair_code) DO NOTHING
+                        """, pair)
+                    
+                    conn.commit()
+                    logger.info(f"Imported {len(default_pairs)} default currency pairs")
+                    return True
+                return False
+    except Exception as e:
+        logger.error(f"Error importing default currency pairs: {e}")
+        return False
+
 # Initialize database tables
 init_db()
+
+# Import default data if needed
+import_default_currency_pairs()

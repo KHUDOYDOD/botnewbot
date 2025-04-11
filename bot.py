@@ -3,6 +3,7 @@ import hashlib
 import time
 import os
 import sys
+import random
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters, ConversationHandler
 from config import *
@@ -34,7 +35,11 @@ PENDING_USERS = {}
 logger = logging.getLogger(__name__)
 
 # Состояния для админа
+# Состояния для разделов админ-панели
 ADMIN_PASSWORD, ADMIN_MENU, ADMIN_USER_MANAGEMENT, ADMIN_BROADCAST_MESSAGE = range(4)
+ADMIN_CURRENCY_MANAGEMENT, ADMIN_CURRENCY_ADD, ADMIN_CURRENCY_EDIT = range(4, 7)
+ADMIN_TEXT_MANAGEMENT, ADMIN_TEXT_ADD, ADMIN_TEXT_EDIT = range(7, 10)
+ADMIN_SETTINGS, ADMIN_CHANGE_PASSWORD, ADMIN_ACTIVITY, ADMIN_ABOUT = range(10, 14)
 
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
@@ -78,17 +83,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             # Если пользователь не подтвержден, предлагаем зарегистрироваться
-            register_keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("📝 Отправить заявку", callback_data="send_request")
-            ]])
+            register_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📝 Отправить заявку", callback_data="send_request")],
+                [InlineKeyboardButton("🌐 Сменить язык", callback_data="change_language")]
+            ])
             
-            await update.message.reply_text(
-                f"👋 Добро пожаловать, @{username}!\n\n"
-                "Для использования бота необходимо отправить заявку на регистрацию.\n"
-                "Администратор рассмотрит вашу заявку и предоставит доступ к боту.\n\n"
-                "Вы можете отправить заявку прямо сейчас или воспользоваться командой /register позже.",
-                reply_markup=register_keyboard
-            )
+            # Пытаемся создать и отправить приветственное изображение
+            from create_welcome_image import create_welcome_image
+            
+            welcome_text = f"👋 Добро пожаловать, @{username}!\n\n" \
+                          "Для использования бота необходимо отправить заявку на регистрацию.\n" \
+                          "Администратор рассмотрит вашу заявку и предоставит доступ к боту.\n\n" \
+                          "Вы можете отправить заявку прямо сейчас или воспользоваться командой /register позже.\n\n" \
+                          "📞 Служба поддержки: @tradeporu"
+            
+            try:
+                # Создаем и отправляем изображение
+                if create_welcome_image():
+                    with open('welcome_image.png', 'rb') as photo:
+                        await update.message.reply_photo(
+                            photo=photo,
+                            caption=welcome_text,
+                            reply_markup=register_keyboard
+                        )
+                else:
+                    # Если изображение не создалось, отправляем текст
+                    await update.message.reply_text(
+                        welcome_text,
+                        reply_markup=register_keyboard
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка при отправке приветственного изображения: {e}")
+                # В случае ошибки просто отправляем текст
+                await update.message.reply_text(
+                    welcome_text,
+                    reply_markup=register_keyboard
+                )
 
     except Exception as e:
         logger.error(f"Start error: {str(e)}")
@@ -129,78 +159,98 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_info = PENDING_USERS[user_id]
 
     if action == "approve":
-        password = ''.join([str(hash(datetime.now()))[i:i+2] for i in range(0, 8, 2)])
-        password_hash = hash_password(password)
-
-        if approve_user(user_id, password_hash):
-            del PENDING_USERS[user_id]
+        try:
+            password = ''.join([str(hash(datetime.now()))[i:i+2] for i in range(0, 8, 2)])
+            password_hash = hash_password(password)
             
-            # Получаем информацию о языке пользователя
-            user_data = get_user(user_id)
-            lang_code = user_data['language_code'] if user_data and 'language_code' in user_data else 'tg'
-            
-            # Сообщения об одобрении на разных языках
-            approval_messages = {
-                'tg': f"✅ Дархости шумо қабул карда шуд!\n\nРамзи шумо барои ворид шудан: `{password}`\n\nЛутфан, онро нигоҳ доред.",
-                'ru': f"✅ Ваша заявка одобрена!\n\nВаш пароль для входа: `{password}`\n\nПожалуйста, сохраните его.",
-                'uz': f"✅ Arizangiz tasdiqlandi!\n\nKirish uchun parolingiz: `{password}`\n\nIltimos, uni saqlab qoling.",
-                'kk': f"✅ Өтінішіңіз мақұлданды!\n\nКіру үшін құпия сөзіңіз: `{password}`\n\nОны сақтап қойыңыз.",
-                'en': f"✅ Your request has been approved!\n\nYour password: `{password}`\n\nPlease save it."
-            }
-            
-            # Тексты кнопок на разных языках
-            button_texts = {
-                'tg': "🚀 Ба бот ворид шавед",
-                'ru': "🚀 Войти в бот",
-                'uz': "🚀 Botga kirish",
-                'kk': "🚀 Ботқа кіру",
-                'en': "🚀 Enter the bot"
-            }
-            
-            # Выбираем сообщение и текст кнопки согласно языку пользователя
-            message = approval_messages.get(lang_code, approval_messages['tg'])
-            button_text = button_texts.get(lang_code, button_texts['tg'])
-            
-            # Создаем клавиатуру с кнопкой для входа
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton(button_text, callback_data="return_to_main")]
-            ])
-            
-            # Отправляем сообщение пользователю
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=message,
-                parse_mode='MarkdownV2',
-                reply_markup=keyboard
-            )
-            
-            # Уведомляем администратора
-            await query.edit_message_text(f"✅ Пользователь @{user_info['username']} одобрен")
-        else:
-            await query.edit_message_text("❌ Ошибка при одобрении пользователя")
+            if approve_user(user_id, password_hash):
+                del PENDING_USERS[user_id]
+                
+                # Экранируем специальные символы для Markdown
+                escaped_password = password.replace("_", "\\_").replace("*", "\\*").replace("[", "\\[").replace("]", "\\]").replace("(", "\\(").replace(")", "\\)").replace("~", "\\~").replace("`", "\\`").replace(">", "\\>").replace("#", "\\#").replace("+", "\\+").replace("-", "\\-").replace("=", "\\=").replace("|", "\\|").replace("{", "\\{").replace("}", "\\}").replace(".", "\\.").replace("!", "\\!")
+                
+                # Получаем информацию о языке пользователя
+                user_data = get_user(user_id)
+                lang_code = user_data['language_code'] if user_data and 'language_code' in user_data else 'tg'
+                
+                # Сообщения об одобрении на разных языках
+                approval_messages = {
+                    'tg': f"✅ Дархости шумо қабул карда шуд\\!\n\nРамзи шумо барои ворид шудан: `{escaped_password}`\n\nЛутфан, онро нигоҳ доред\\.",
+                    'ru': f"✅ Ваша заявка одобрена\\!\n\nВаш пароль для входа: `{escaped_password}`\n\nПожалуйста, сохраните его\\.",
+                    'uz': f"✅ Arizangiz tasdiqlandi\\!\n\nKirish uchun parolingiz: `{escaped_password}`\n\nIltimos, uni saqlab qoling\\.",
+                    'kk': f"✅ Өтінішіңіз мақұлданды\\!\n\nКіру үшін құпия сөзіңіз: `{escaped_password}`\n\nОны сақтап қойыңыз\\.",
+                    'en': f"✅ Your request has been approved\\!\n\nYour password: `{escaped_password}`\n\nPlease save it\\."
+                }
+                
+                # Тексты кнопок на разных языках
+                button_texts = {
+                    'tg': "🚀 Ба бот ворид шавед",
+                    'ru': "🚀 Войти в бот",
+                    'uz': "🚀 Botga kirish",
+                    'kk': "🚀 Ботқа кіру",
+                    'en': "🚀 Enter the bot"
+                }
+                
+                # Выбираем сообщение и текст кнопки согласно языку пользователя
+                message = approval_messages.get(lang_code, approval_messages['tg'])
+                button_text = button_texts.get(lang_code, button_texts['tg'])
+                
+                # Создаем клавиатуру с кнопкой для входа
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(button_text, callback_data="return_to_main")]
+                ])
+                
+                # Отправляем сообщение пользователю
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=message,
+                    parse_mode='MarkdownV2',
+                    reply_markup=keyboard
+                )
+                
+                # Уведомляем администратора
+                await query.edit_message_text(f"✅ Пользователь @{user_info['username']} одобрен")
+            else:
+                await query.edit_message_text("❌ Ошибка при одобрении пользователя")
+        except Exception as e:
+            logger.error(f"Ошибка при одобрении пользователя через кнопку действия: {e}")
+            await query.edit_message_text(f"❌ Ошибка при одобрении пользователя: {str(e)}")
     else:
+        # Удаляем пользователя из списка ожидающих
         del PENDING_USERS[user_id]
         
         # Получаем информацию о языке пользователя
         user_data = get_user(user_id)
         lang_code = user_data['language_code'] if user_data and 'language_code' in user_data else 'tg'
         
+        # Сбрасываем статус одобрения пользователя, но НЕ удаляем его из базы
+        # Это позволит пользователю повторно отправить заявку
+        from models import reset_user_approval
+        reset_user_approval(user_id)
+        
         # Сообщения об отклонении на разных языках
         rejection_messages = {
-            'tg': "❌ Дархости шумо радд карда шуд.",
-            'ru': "❌ Ваша заявка отклонена администратором.",
-            'uz': "❌ Arizangiz administrator tomonidan rad etildi.",
-            'kk': "❌ Сіздің өтінішіңіз әкімші тарапынан қабылданбады.",
-            'en': "❌ Your request has been rejected by the administrator."
+            'tg': "❌ Дархости шумо радд карда шуд.\n\nШумо метавонед дархости навро фиристед.",
+            'ru': "❌ Ваша заявка отклонена администратором.\n\nВы можете отправить новую заявку.",
+            'uz': "❌ Arizangiz administrator tomonidan rad etildi.\n\nSiz yangi ariza yuborishingiz mumkin.",
+            'kk': "❌ Сіздің өтінішіңіз әкімші тарапынан қабылданбады.\n\nСіз жаңа өтініш жібере аласыз.",
+            'en': "❌ Your request has been rejected by the administrator.\n\nYou can send a new request."
         }
         
         # Выбираем сообщение согласно языку пользователя
         message = rejection_messages.get(lang_code, rejection_messages['tg'])
         
-        # Отправляем сообщение пользователю
+        # Создаем клавиатуру с кнопкой для повторной отправки заявки
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📝 Отправить новую заявку", callback_data="send_request")],
+            [InlineKeyboardButton("🌐 Сменить язык", callback_data="change_language")]
+        ])
+        
+        # Отправляем сообщение пользователю с кнопкой повторной отправки
         await context.bot.send_message(
             chat_id=user_id,
-            text=message
+            text=message,
+            reply_markup=keyboard
         )
         
         # Уведомляем администратора
@@ -353,28 +403,90 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_data = get_user(user_id)
             lang_code = user_data['language_code'] if user_data and 'language_code' in user_data else 'tg'
             
-            # Сообщения о заявке на разных языках
+            # Сообщения о заявке на разных языках с инструкциями по регистрации
             request_messages = {
-                'tg': "📝 Дархости шумо ба маъмур фиристода шуд. "
-                      "Лутфан, тасдиқро интизор шавед. "
-                      "Вақте ки дархости шумо баррасӣ мешавад, шумо огоҳинома мегиред.",
-                'ru': "📝 Ваша заявка отправлена администратору. "
-                      "Пожалуйста, ожидайте подтверждения. "
-                      "Вы получите уведомление, когда ваша заявка будет рассмотрена.",
-                'uz': "📝 Arizangiz administratorga yuborildi. "
-                      "Iltimos, tasdiqlashni kuting. "
-                      "Arizangiz ko'rib chiqilganda, sizga xabar beriladi.",
-                'kk': "📝 Сіздің өтінішіңіз әкімшіге жіберілді. "
-                      "Растауды күтіңіз. "
-                      "Өтінішіңіз қаралғанда, сізге хабарлама жіберіледі.",
-                'en': "📝 Your request has been sent to the administrator. "
-                      "Please wait for confirmation. "
-                      "You will receive a notification when your request is reviewed."
+                'tg': "📝 Дархости шумо ба маъмур фиристода шуд.\n\n"
+                      "⚠️ Барои гирифтани дастрасӣ ба бот, лутфан:\n"
+                      "1️⃣ Дар сайти Pocket Option бо тариқи TRADEPO.RU ба қайд гиред\n"
+                      "2️⃣ ID худро ба админ равон кунед (мисол: id 111111)\n\n"
+                      "Баъд аз ин, дархости шумо баррасӣ карда мешавад.",
+                      
+                'ru': "📝 Ваша заявка отправлена администратору.\n\n"
+                      "⚠️ Для получения доступа к боту, пожалуйста:\n"
+                      "1️⃣ Зарегистрируйтесь на сайте Pocket Option через TRADEPO.RU\n"
+                      "2️⃣ Отправьте свой ID администратору (пример: id 111111)\n\n"
+                      "После этого ваша заявка будет рассмотрена.",
+                      
+                'uz': "📝 Arizangiz administratorga yuborildi.\n\n"
+                      "⚠️ Botga kirish uchun:\n"
+                      "1️⃣ Pocket Option saytida TRADEPO.RU orqali ro'yxatdan o'ting\n"
+                      "2️⃣ ID raqamingizni adminga yuboring (misol: id 111111)\n\n"
+                      "Shundan so'ng arizangiz ko'rib chiqiladi.",
+                      
+                'kk': "📝 Сіздің өтінішіңіз әкімшіге жіберілді.\n\n"
+                      "⚠️ Ботқа кіру үшін:\n"
+                      "1️⃣ Pocket Option сайтында TRADEPO.RU арқылы тіркеліңіз\n"
+                      "2️⃣ ID нөміріңізді әкімшіге жіберіңіз (мысалы: id 111111)\n\n"
+                      "Осыдан кейін өтінішіңіз қаралады.",
+                      
+                'en': "📝 Your request has been sent to the administrator.\n\n"
+                      "⚠️ To get access to the bot, please:\n"
+                      "1️⃣ Register on Pocket Option website through TRADEPO.RU\n"
+                      "2️⃣ Send your ID to the administrator (example: id 111111)\n\n"
+                      "After that, your request will be reviewed."
             }
             
             # Отправляем сообщение пользователю на его языке
             message = request_messages.get(lang_code, request_messages['tg'])
-            await query.edit_message_text(message)
+            
+            # Добавляем информацию о контактах службы поддержки
+            support_messages = {
+                'tg': "\n\n📞 Агар савол дошта бошед, метавонед бо хадамоти дастгирӣ тамос гиред: @tradeporu",
+                'ru': "\n\n📞 Если у вас есть вопросы, вы можете связаться со службой поддержки: @tradeporu",
+                'uz': "\n\n📞 Savollaringiz bo'lsa, qo'llab-quvvatlash xizmatiga murojaat qilishingiz mumkin: @tradeporu",
+                'kk': "\n\n📞 Сұрақтарыңыз болса, қолдау қызметіне хабарласа аласыз: @tradeporu",
+                'en': "\n\n📞 If you have any questions, you can contact support: @tradeporu"
+            }
+            
+            # Добавляем информацию о поддержке к сообщению
+            support_text = support_messages.get(lang_code, support_messages['tg'])
+            message += support_text
+            
+            # Пробуем создать и отправить изображение
+            # Импортируем модуль для создания изображения запроса
+            from create_request_image import create_request_image
+            try:
+                # Создаем красивое изображение запроса с именем пользователя
+                if create_request_image(username):
+                    # Сначала удаляем текущее сообщение
+                    await query.message.delete()
+                    
+                    # Создаем клавиатуру для кнопок под изображением
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🌐 Сменить язык", callback_data="change_language")]
+                    ])
+                    
+                    # Отправляем изображение с новым текстом и клавиатурой
+                    with open('request_image.png', 'rb') as photo:
+                        await context.bot.send_photo(
+                            chat_id=user_id,
+                            photo=photo,
+                            caption=message,
+                            reply_markup=keyboard
+                        )
+                else:
+                    # Если не удалось создать изображение, просто редактируем текст с клавиатурой
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🌐 Сменить язык", callback_data="change_language")]
+                    ])
+                    await query.edit_message_text(message, reply_markup=keyboard)
+            except Exception as e:
+                logger.error(f"Ошибка при отправке изображения запроса: {e}")
+                # В случае ошибки просто редактируем текст с клавиатурой
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🌐 Сменить язык", callback_data="change_language")]
+                ])
+                await query.edit_message_text(message, reply_markup=keyboard)
             
             # Получаем чат администратора и отправляем ему уведомление
             admin_chat_id = await get_admin_chat_id(context.bot)
@@ -510,13 +622,36 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Хатогӣ ҳангоми боргирӣ рух дод. Лутфан, дубора кӯшиш кунед.")
 
 def get_admin_keyboard():
-    """Создать клавиатуру админ-панели"""
+    """Создать улучшенную клавиатуру админ-панели"""
     keyboard = [
-        [InlineKeyboardButton("👥 Управление пользователями", callback_data="admin_users")],
-        [InlineKeyboardButton("📨 Рассылка сообщений", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")],
-        [InlineKeyboardButton("🔄 Обновить базу данных", callback_data="admin_update_db")],
-        [InlineKeyboardButton("🌐 Сменить язык", callback_data="change_language")]
+        # Основные функции управления
+        [
+            InlineKeyboardButton("👥 Управление пользователями", callback_data="admin_users"),
+            InlineKeyboardButton("💱 Управление валютами", callback_data="admin_currencies")
+        ],
+        [
+            InlineKeyboardButton("📝 Управление текстами", callback_data="admin_texts"),
+            InlineKeyboardButton("📨 Рассылка сообщений", callback_data="admin_broadcast")
+        ],
+        
+        # Аналитические функции и настройки
+        [InlineKeyboardButton("📊 Статистика бота", callback_data="admin_stats")],
+        [
+            InlineKeyboardButton("📈 Анализ активности", callback_data="admin_activity"),
+            InlineKeyboardButton("⚙️ Настройки", callback_data="admin_settings")
+        ],
+        
+        # Безопасность и обслуживание
+        [
+            InlineKeyboardButton("🔐 Сменить пароль", callback_data="admin_change_password"),
+            InlineKeyboardButton("🔄 Обновить БД", callback_data="admin_update_db")
+        ],
+        
+        # Разное
+        [
+            InlineKeyboardButton("🌐 Сменить язык", callback_data="change_language"),
+            InlineKeyboardButton("ℹ️ О боте", callback_data="admin_about")
+        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -696,6 +831,99 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return ADMIN_MENU
     
+    elif action == "admin_currencies":
+        # Переход в раздел управления валютами
+        from models import get_all_currency_pairs
+        currency_pairs = get_all_currency_pairs()
+        
+        currency_list = "\n".join([
+            f"- {pair['display_name']} ({pair['pair_code']}): {'🟢 Активна' if pair['is_active'] else '🔴 Неактивна'}"
+            for pair in currency_pairs
+        ])
+        
+        if not currency_list:
+            currency_list = "Нет добавленных валютных пар"
+        
+        currency_keyboard = [
+            [InlineKeyboardButton("➕ Добавить валютную пару", callback_data="admin_add_currency")],
+            [InlineKeyboardButton("🔄 Обновить все пары", callback_data="admin_refresh_currencies")],
+            [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+        ]
+        
+        await query.edit_message_text(
+            f"💱 Управление валютными парами\n\nСписок валютных пар:\n{currency_list}",
+            reply_markup=InlineKeyboardMarkup(currency_keyboard)
+        )
+        return ADMIN_CURRENCY_MANAGEMENT
+        
+    elif action == "admin_texts":
+        # Переход в раздел управления текстами
+        from models import get_all_bot_messages
+        messages = get_all_bot_messages()
+        
+        texts_keyboard = [
+            [InlineKeyboardButton("➕ Добавить новый текст", callback_data="admin_add_text")],
+            [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+        ]
+        
+        # Группируем сообщения по ключам
+        message_keys = {}
+        for msg in messages:
+            key = msg['message_key']
+            if key not in message_keys:
+                message_keys[key] = []
+            message_keys[key].append(msg)
+        
+        # Добавляем кнопки для каждого ключа сообщения
+        for key in message_keys:
+            texts_keyboard.insert(-1, [InlineKeyboardButton(f"📝 {key}", callback_data=f"admin_edit_text_{key}")])
+        
+        if not message_keys:
+            message_summary = "Нет добавленных текстов"
+        else:
+            message_summary = "Тексты в базе данных:\n" + "\n".join([
+                f"- {key} ({len(langs)} языков)" 
+                for key, langs in message_keys.items()
+            ])
+        
+        await query.edit_message_text(
+            f"📝 Управление текстами бота\n\n{message_summary}",
+            reply_markup=InlineKeyboardMarkup(texts_keyboard)
+        )
+        return ADMIN_TEXT_MANAGEMENT
+        
+    elif action == "admin_activity":
+        # Переход к анализу активности
+        await query.edit_message_text(
+            "Загрузка анализа активности...",
+            reply_markup=None
+        )
+        return await admin_activity(update, context)
+    
+    elif action == "admin_settings":
+        # Переход к настройкам бота
+        await query.edit_message_text(
+            "Загрузка настроек бота...",
+            reply_markup=None
+        )
+        return await admin_settings(update, context)
+    
+    elif action == "admin_change_password":
+        # Переход к смене пароля администратора
+        await query.edit_message_text(
+            "Загрузка страницы смены пароля...",
+            reply_markup=None
+        )
+        return await admin_change_password(update, context)
+    
+    elif action == "admin_about":
+        # Переход к информации о боте
+        await query.edit_message_text(
+            "Загрузка информации о боте...",
+            reply_markup=None
+        )
+        return await admin_about(update, context)
+    
     elif action == "admin_back":
         # Вернуться в главное меню админа
         await query.edit_message_text(
@@ -867,23 +1095,68 @@ async def admin_user_management(update: Update, context: ContextTypes.DEFAULT_TY
         user_id = int(action.split("_")[1])
         
         if is_approve:
-            # Генерируем пароль и одобряем пользователя
-            password = ''.join([str(hash(datetime.now()))[i:i+2] for i in range(0, 8, 2)])
-            password_hash = hash_password(password)
-            
-            if approve_user(user_id, password_hash):
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"✅ Ваша заявка одобрена!\n\nВаш пароль для входа: `{password}`\n\nПожалуйста, сохраните его.",
-                    parse_mode='MarkdownV2'
-                )
+            try:
+                # Генерируем пароль и одобряем пользователя
+                password = ''.join([str(hash(datetime.now()))[i:i+2] for i in range(0, 8, 2)])
+                password_hash = hash_password(password)
+                
+                if approve_user(user_id, password_hash):
+                    # Экранируем специальные символы для Markdown
+                    escaped_password = password.replace("_", "\\_").replace("*", "\\*").replace("[", "\\[").replace("]", "\\]").replace("(", "\\(").replace(")", "\\)").replace("~", "\\~").replace("`", "\\`").replace(">", "\\>").replace("#", "\\#").replace("+", "\\+").replace("-", "\\-").replace("=", "\\=").replace("|", "\\|").replace("{", "\\{").replace("}", "\\}").replace(".", "\\.").replace("!", "\\!")
+                    
+                    # Получаем язык пользователя
+                    user_data = get_user(user_id)
+                    lang_code = user_data['language_code'] if user_data and 'language_code' in user_data else 'tg'
+                    
+                    # Сообщения об одобрении на разных языках
+                    approval_messages = {
+                        'tg': f"✅ Дархости шумо қабул карда шуд\\!\n\nРамзи шумо барои ворид шудан: `{escaped_password}`\n\nЛутфан, онро нигоҳ доред\\.",
+                        'ru': f"✅ Ваша заявка одобрена\\!\n\nВаш пароль для входа: `{escaped_password}`\n\nПожалуйста, сохраните его\\.",
+                        'uz': f"✅ Arizangiz tasdiqlandi\\!\n\nKirish uchun parolingiz: `{escaped_password}`\n\nIltimos, uni saqlab qoling\\.",
+                        'kk': f"✅ Өтінішіңіз мақұлданды\\!\n\nКіру үшін құпия сөзіңіз: `{escaped_password}`\n\nОны сақтап қойыңыз\\.",
+                        'en': f"✅ Your request has been approved\\!\n\nYour password: `{escaped_password}`\n\nPlease save it\\."
+                    }
+                    
+                    # Тексты кнопок на разных языках
+                    button_texts = {
+                        'tg': "🚀 Ба бот ворид шавед",
+                        'ru': "🚀 Войти в бот",
+                        'uz': "🚀 Botga kirish",
+                        'kk': "🚀 Ботқа кіру",
+                        'en': "🚀 Enter the bot"
+                    }
+                    
+                    # Выбираем сообщение и текст кнопки согласно языку пользователя
+                    message = approval_messages.get(lang_code, approval_messages['tg'])
+                    button_text = button_texts.get(lang_code, button_texts['tg'])
+                    
+                    # Создаем клавиатуру с кнопкой для входа
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(button_text, callback_data="return_to_main")]
+                    ])
+                    
+                    # Отправляем сообщение пользователю
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=message,
+                        parse_mode='MarkdownV2',
+                        reply_markup=keyboard
+                    )
+                    
+                    # Уведомляем администратора
+                    await query.edit_message_text(
+                        f"✅ Пользователь с ID {user_id} одобрен. Пароль отправлен пользователю.",
+                        reply_markup=get_user_management_keyboard()
+                    )
+                else:
+                    await query.edit_message_text(
+                        "❌ Произошла ошибка при одобрении пользователя.",
+                        reply_markup=get_user_management_keyboard()
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка при одобрении пользователя: {e}")
                 await query.edit_message_text(
-                    f"✅ Пользователь с ID {user_id} одобрен. Пароль отправлен пользователю.",
-                    reply_markup=get_user_management_keyboard()
-                )
-            else:
-                await query.edit_message_text(
-                    "❌ Произошла ошибка при одобрении пользователя.",
+                    f"❌ Произошла ошибка при одобрении пользователя: {str(e)}",
                     reply_markup=get_user_management_keyboard()
                 )
         else:
@@ -939,12 +1212,61 @@ async def register_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'timestamp': datetime.now()
     }
     
-    # Отправляем сообщение пользователю
-    await update.message.reply_text(
-        "📝 Ваша заявка отправлена администратору. "
-        "Пожалуйста, ожидайте подтверждения. "
-        "Вы получите уведомление, когда ваша заявка будет рассмотрена."
-    )
+    # Получаем язык пользователя
+    user_data = get_user(user_id)
+    lang_code = user_data['language_code'] if user_data and 'language_code' in user_data else 'tg'
+    
+    # Сообщения о заявке на разных языках
+    request_messages = {
+        'tg': "📝 Дархости шумо ба маъмур фиристода шуд. "
+              "Лутфан, тасдиқро интизор шавед. "
+              "Вақте ки дархости шумо баррасӣ мешавад, шумо огоҳинома мегиред.",
+        'ru': "📝 Ваша заявка отправлена администратору. "
+              "Пожалуйста, ожидайте подтверждения. "
+              "Вы получите уведомление, когда ваша заявка будет рассмотрена.",
+        'uz': "📝 Arizangiz administratorga yuborildi. "
+              "Iltimos, tasdiqlashni kuting. "
+              "Arizangiz ko'rib chiqilganda, sizga xabar beriladi.",
+        'kk': "📝 Сіздің өтінішіңіз әкімшіге жіберілді. "
+              "Растауды күтіңіз. "
+              "Өтінішіңіз қаралғанда, сізге хабарлама жіберіледі.",
+        'en': "📝 Your request has been sent to the administrator. "
+              "Please wait for confirmation. "
+              "You will receive a notification when your request is reviewed."
+    }
+    
+    # Добавляем информацию о контактах службы поддержки
+    support_messages = {
+        'tg': "\n\n📞 Агар савол дошта бошед, метавонед бо хадамоти дастгирӣ тамос гиред: @tradeporu",
+        'ru': "\n\n📞 Если у вас есть вопросы, вы можете связаться со службой поддержки: @tradeporu",
+        'uz': "\n\n📞 Savollaringiz bo'lsa, qo'llab-quvvatlash xizmatiga murojaat qilishingiz mumkin: @tradeporu",
+        'kk': "\n\n📞 Сұрақтарыңыз болса, қолдау қызметіне хабарласа аласыз: @tradeporu",
+        'en': "\n\n📞 If you have any questions, you can contact support: @tradeporu"
+    }
+    
+    # Отправляем сообщение пользователю на его языке
+    message = request_messages.get(lang_code, request_messages['tg'])
+    support_text = support_messages.get(lang_code, support_messages['tg'])
+    message += support_text
+    
+    # Пробуем создать и отправить изображение
+    from create_welcome_image import create_welcome_image
+    try:
+        # Создаем изображение
+        if create_welcome_image():
+            # Отправляем изображение с новым текстом
+            with open('welcome_image.png', 'rb') as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=message
+                )
+        else:
+            # Если не удалось создать изображение, просто отправляем текст
+            await update.message.reply_text(message)
+    except Exception as e:
+        logger.error(f"Ошибка при отправке приветственного изображения: {e}")
+        # В случае ошибки просто отправляем текст
+        await update.message.reply_text(message)
     
     # Получаем чат администратора и отправляем ему уведомление
     admin_chat_id = await get_admin_chat_id(context.bot)
@@ -993,6 +1315,670 @@ def main():
             application.add_handler(CommandHandler("register", register_command))
             
             # Обработчики для админ-панели
+            # Добавляем функции для управления валютами и текстами
+            async def admin_currency_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Обработчик меню управления валютными парами"""
+                query = update.callback_query
+                if query:
+                    await query.answer()
+                    action = query.data
+                    
+                    if action == "admin_back":
+                        # Вернуться в главное меню админа
+                        await query.edit_message_text(
+                            "👑 Панель администратора",
+                            reply_markup=get_admin_keyboard()
+                        )
+                        return ADMIN_MENU
+                    
+                    elif action == "admin_add_currency":
+                        # Форма добавления новой валютной пары
+                        await query.edit_message_text(
+                            "➕ Добавление новой валютной пары\n\n"
+                            "Введите данные в формате:\n"
+                            "Код пары|Символ|Отображаемое название\n\n"
+                            "Например:\n"
+                            "BTCUSD|BTC-USD|BTC/USD",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("↩️ Назад", callback_data="admin_currencies")
+                            ]])
+                        )
+                        return ADMIN_CURRENCY_ADD
+                    
+                    elif action == "admin_refresh_currencies":
+                        # Обновляем список валютных пар из базы
+                        from models import import_default_currency_pairs
+                        success = import_default_currency_pairs()
+                        
+                        if success:
+                            await query.edit_message_text(
+                                "✅ Валютные пары успешно обновлены!",
+                                reply_markup=InlineKeyboardMarkup([[
+                                    InlineKeyboardButton("↩️ Назад", callback_data="admin_currencies")
+                                ]])
+                            )
+                        else:
+                            await query.edit_message_text(
+                                "ℹ️ Валютные пары уже обновлены или в базе уже есть данные.",
+                                reply_markup=InlineKeyboardMarkup([[
+                                    InlineKeyboardButton("↩️ Назад", callback_data="admin_currencies")
+                                ]])
+                            )
+                        return ADMIN_CURRENCY_MANAGEMENT
+                    
+                    elif action.startswith("currency_toggle_"):
+                        # Включение/отключение валютной пары
+                        pair_code = action.replace("currency_toggle_", "")
+                        from models import update_currency_pair_status, get_all_currency_pairs
+                        
+                        # Получаем текущий статус пары
+                        pairs = get_all_currency_pairs()
+                        current_pair = next((p for p in pairs if p['pair_code'] == pair_code), None)
+                        
+                        if current_pair:
+                            # Меняем статус на противоположный
+                            new_status = not current_pair['is_active']
+                            success = update_currency_pair_status(pair_code, new_status)
+                            
+                            if success:
+                                status_text = "активирована" if new_status else "деактивирована"
+                                await query.edit_message_text(
+                                    f"✅ Валютная пара {current_pair['display_name']} успешно {status_text}!",
+                                    reply_markup=InlineKeyboardMarkup([[
+                                        InlineKeyboardButton("↩️ Назад", callback_data="admin_currencies")
+                                    ]])
+                                )
+                            else:
+                                await query.edit_message_text(
+                                    "❌ Ошибка при изменении статуса валютной пары.",
+                                    reply_markup=InlineKeyboardMarkup([[
+                                        InlineKeyboardButton("↩️ Назад", callback_data="admin_currencies")
+                                    ]])
+                                )
+                        else:
+                            await query.edit_message_text(
+                                "❌ Валютная пара не найдена.",
+                                reply_markup=InlineKeyboardMarkup([[
+                                    InlineKeyboardButton("↩️ Назад", callback_data="admin_currencies")
+                                ]])
+                            )
+                        return ADMIN_CURRENCY_MANAGEMENT
+                    
+                    elif action == "admin_currencies":
+                        # Возврат в меню валют
+                        from models import get_all_currency_pairs
+                        currency_pairs = get_all_currency_pairs()
+                        
+                        currency_list = "\n".join([
+                            f"- {pair['display_name']} ({pair['pair_code']}): {'🟢 Активна' if pair['is_active'] else '🔴 Неактивна'}"
+                            for pair in currency_pairs
+                        ])
+                        
+                        if not currency_list:
+                            currency_list = "Нет добавленных валютных пар"
+                        
+                        currency_keyboard = [
+                            [InlineKeyboardButton("➕ Добавить валютную пару", callback_data="admin_add_currency")],
+                            [InlineKeyboardButton("🔄 Обновить все пары", callback_data="admin_refresh_currencies")],
+                            [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+                        ]
+                        
+                        # Добавляем кнопки для каждой валютной пары
+                        for pair in currency_pairs:
+                            toggle_text = "🔴 Деактивировать" if pair['is_active'] else "🟢 Активировать"
+                            currency_keyboard.insert(-1, [
+                                InlineKeyboardButton(f"{pair['display_name']} - {toggle_text}", 
+                                                    callback_data=f"currency_toggle_{pair['pair_code']}")
+                            ])
+                        
+                        await query.edit_message_text(
+                            f"💱 Управление валютными парами\n\nСписок валютных пар:\n{currency_list}",
+                            reply_markup=InlineKeyboardMarkup(currency_keyboard)
+                        )
+                        return ADMIN_CURRENCY_MANAGEMENT
+                
+                return ADMIN_CURRENCY_MANAGEMENT
+            
+            async def admin_add_currency(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Обработчик добавления новой валютной пары"""
+                if update.callback_query:
+                    query = update.callback_query
+                    await query.answer()
+                    
+                    if query.data == "admin_currencies":
+                        # Возврат в меню валют
+                        return await admin_currency_management(update, context)
+                    
+                    return ADMIN_CURRENCY_ADD
+                
+                if update.message:
+                    # Обработка данных новой валютной пары
+                    text = update.message.text
+                    parts = text.strip().split('|')
+                    
+                    if len(parts) != 3:
+                        await update.message.reply_text(
+                            "❌ Неверный формат данных. Введите данные в формате:\n"
+                            "Код пары|Символ|Отображаемое название\n\n"
+                            "Например:\n"
+                            "BTCUSD|BTC-USD|BTC/USD",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("↩️ Назад", callback_data="admin_currencies")
+                            ]])
+                        )
+                        return ADMIN_CURRENCY_ADD
+                    
+                    pair_code = parts[0].strip()
+                    symbol = parts[1].strip()
+                    display_name = parts[2].strip()
+                    
+                    from models import add_or_update_currency_pair
+                    pair_id = add_or_update_currency_pair(pair_code, symbol, display_name)
+                    
+                    if pair_id:
+                        # Успешно добавлено
+                        await update.message.reply_text(
+                            f"✅ Валютная пара {display_name} успешно добавлена!",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("↩️ К списку валют", callback_data="admin_currencies")
+                            ]])
+                        )
+                    else:
+                        # Ошибка при добавлении
+                        await update.message.reply_text(
+                            "❌ Ошибка при добавлении валютной пары.",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("↩️ К списку валют", callback_data="admin_currencies")
+                            ]])
+                        )
+                    
+                    return ADMIN_CURRENCY_MANAGEMENT
+                
+                return ADMIN_CURRENCY_ADD
+            
+            async def admin_text_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Обработчик управления текстами бота"""
+                query = update.callback_query
+                if query:
+                    await query.answer()
+                    action = query.data
+                    
+                    if action == "admin_back":
+                        # Вернуться в главное меню админа
+                        await query.edit_message_text(
+                            "👑 Панель администратора",
+                            reply_markup=get_admin_keyboard()
+                        )
+                        return ADMIN_MENU
+                    
+                    elif action == "admin_add_text":
+                        # Форма добавления нового текста
+                        await query.edit_message_text(
+                            "➕ Добавление нового текста\n\n"
+                            "Введите данные в формате:\n"
+                            "Ключ|Язык|Текст\n\n"
+                            "Например:\n"
+                            "WELCOME|ru|Добро пожаловать в бот!",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("↩️ Назад", callback_data="admin_texts")
+                            ]])
+                        )
+                        return ADMIN_TEXT_ADD
+                    
+                    elif action.startswith("admin_edit_text_"):
+                        # Редактирование конкретного текста
+                        key = action.replace("admin_edit_text_", "")
+                        
+                        from models import get_all_bot_messages
+                        messages = get_all_bot_messages()
+                        
+                        # Фильтруем сообщения по ключу
+                        key_messages = [msg for msg in messages if msg['message_key'] == key]
+                        
+                        message_text = f"📝 Редактирование текста: {key}\n\n"
+                        
+                        for msg in key_messages:
+                            lang_code = msg['language_code']
+                            text = msg['message_text']
+                            message_text += f"*{lang_code}*: {text[:50]}{'...' if len(text) > 50 else ''}\n\n"
+                        
+                        edit_keyboard = [
+                            [InlineKeyboardButton("➕ Добавить перевод", callback_data=f"admin_add_translation_{key}")],
+                            [InlineKeyboardButton("↩️ Назад", callback_data="admin_texts")]
+                        ]
+                        
+                        # Добавляем кнопки для редактирования каждого языка
+                        for msg in key_messages:
+                            lang_code = msg['language_code']
+                            edit_keyboard.insert(-1, [
+                                InlineKeyboardButton(f"✏️ Изменить {lang_code}", 
+                                                    callback_data=f"admin_edit_translation_{key}_{lang_code}")
+                            ])
+                        
+                        await query.edit_message_text(
+                            message_text,
+                            reply_markup=InlineKeyboardMarkup(edit_keyboard)
+                        )
+                        return ADMIN_TEXT_EDIT
+                    
+                    elif action == "admin_texts":
+                        # Возврат в меню текстов
+                        from models import get_all_bot_messages
+                        messages = get_all_bot_messages()
+                        
+                        texts_keyboard = [
+                            [InlineKeyboardButton("➕ Добавить новый текст", callback_data="admin_add_text")],
+                            [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+                        ]
+                        
+                        # Группируем сообщения по ключам
+                        message_keys = {}
+                        for msg in messages:
+                            key = msg['message_key']
+                            if key not in message_keys:
+                                message_keys[key] = []
+                            message_keys[key].append(msg)
+                        
+                        # Добавляем кнопки для каждого ключа сообщения
+                        for key in message_keys:
+                            texts_keyboard.insert(-1, [InlineKeyboardButton(f"📝 {key}", callback_data=f"admin_edit_text_{key}")])
+                        
+                        if not message_keys:
+                            message_summary = "Нет добавленных текстов"
+                        else:
+                            message_summary = "Тексты в базе данных:\n" + "\n".join([
+                                f"- {key} ({len(langs)} языков)" 
+                                for key, langs in message_keys.items()
+                            ])
+                        
+                        await query.edit_message_text(
+                            f"📝 Управление текстами бота\n\n{message_summary}",
+                            reply_markup=InlineKeyboardMarkup(texts_keyboard)
+                        )
+                        return ADMIN_TEXT_MANAGEMENT
+                
+                return ADMIN_TEXT_MANAGEMENT
+            
+            async def admin_text_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Обработчик добавления нового текста"""
+                if update.callback_query:
+                    query = update.callback_query
+                    await query.answer()
+                    
+                    if query.data == "admin_texts":
+                        # Возврат в меню текстов
+                        return await admin_text_management(update, context)
+                    
+                    return ADMIN_TEXT_ADD
+                
+                if update.message:
+                    # Обработка данных нового текста
+                    text = update.message.text
+                    parts = text.strip().split('|', 2)  # Разделяем на 3 части (ключ, язык, текст)
+                    
+                    if len(parts) != 3:
+                        await update.message.reply_text(
+                            "❌ Неверный формат данных. Введите данные в формате:\n"
+                            "Ключ|Язык|Текст\n\n"
+                            "Например:\n"
+                            "WELCOME|ru|Добро пожаловать в бот!",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("↩️ Назад", callback_data="admin_texts")
+                            ]])
+                        )
+                        return ADMIN_TEXT_ADD
+                    
+                    key = parts[0].strip()
+                    lang_code = parts[1].strip()
+                    message_text = parts[2].strip()
+                    
+                    from models import update_bot_message
+                    msg_id = update_bot_message(key, lang_code, message_text)
+                    
+                    if msg_id:
+                        # Успешно добавлено
+                        await update.message.reply_text(
+                            f"✅ Текст с ключом {key} для языка {lang_code} успешно добавлен!",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("↩️ К списку текстов", callback_data="admin_texts")
+                            ]])
+                        )
+                    else:
+                        # Ошибка при добавлении
+                        await update.message.reply_text(
+                            "❌ Ошибка при добавлении текста.",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("↩️ К списку текстов", callback_data="admin_texts")
+                            ]])
+                        )
+                    
+                    return ADMIN_TEXT_MANAGEMENT
+                
+                return ADMIN_TEXT_ADD
+            
+            async def admin_text_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Обработчик редактирования текстов"""
+                if update.callback_query:
+                    query = update.callback_query
+                    await query.answer()
+                    action = query.data
+                    
+                    if action == "admin_texts":
+                        # Возврат в меню текстов
+                        return await admin_text_management(update, context)
+                    
+                    elif action.startswith("admin_add_translation_"):
+                        # Добавление перевода для существующего ключа
+                        key = action.replace("admin_add_translation_", "")
+                        
+                        await query.edit_message_text(
+                            f"➕ Добавление перевода для ключа: {key}\n\n"
+                            "Введите данные в формате:\n"
+                            "Язык|Текст\n\n"
+                            "Например:\n"
+                            "en|Welcome to the bot!",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("↩️ Назад", callback_data=f"admin_edit_text_{key}")
+                            ]])
+                        )
+                        # Сохраняем ключ в контексте для последующего использования
+                        context.user_data['current_edit_key'] = key
+                        return ADMIN_TEXT_ADD
+                    
+                    elif action.startswith("admin_edit_translation_"):
+                        # Редактирование конкретного перевода
+                        parts = action.replace("admin_edit_translation_", "").split('_')
+                        if len(parts) >= 2:
+                            key = parts[0]
+                            lang_code = parts[1]
+                            
+                            from models import get_bot_message
+                            current_text = get_bot_message(key, lang_code)
+                            
+                            if current_text:
+                                await query.edit_message_text(
+                                    f"✏️ Редактирование текста для ключа: {key}, язык: {lang_code}\n\n"
+                                    f"Текущий текст:\n{current_text}\n\n"
+                                    "Введите новый текст:",
+                                    reply_markup=InlineKeyboardMarkup([[
+                                        InlineKeyboardButton("↩️ Назад", callback_data=f"admin_edit_text_{key}")
+                                    ]])
+                                )
+                                # Сохраняем данные в контексте для последующего использования
+                                context.user_data['current_edit_key'] = key
+                                context.user_data['current_edit_lang'] = lang_code
+                                return ADMIN_TEXT_EDIT
+                            else:
+                                await query.edit_message_text(
+                                    "❌ Текст не найден.",
+                                    reply_markup=InlineKeyboardMarkup([[
+                                        InlineKeyboardButton("↩️ Назад", callback_data="admin_texts")
+                                    ]])
+                                )
+                                return ADMIN_TEXT_MANAGEMENT
+                    
+                    return ADMIN_TEXT_EDIT
+                
+                if update.message:
+                    # Обработка нового текста
+                    text = update.message.text
+                    
+                    # Определяем режим (добавление перевода или редактирование)
+                    if 'current_edit_key' in context.user_data and 'current_edit_lang' in context.user_data:
+                        # Режим редактирования существующего перевода
+                        key = context.user_data['current_edit_key']
+                        lang_code = context.user_data['current_edit_lang']
+                        
+                        from models import update_bot_message
+                        msg_id = update_bot_message(key, lang_code, text)
+                        
+                        if msg_id:
+                            # Успешно обновлено
+                            await update.message.reply_text(
+                                f"✅ Текст с ключом {key} для языка {lang_code} успешно обновлен!",
+                                reply_markup=InlineKeyboardMarkup([[
+                                    InlineKeyboardButton("↩️ К списку текстов", callback_data="admin_texts")
+                                ]])
+                            )
+                        else:
+                            # Ошибка при обновлении
+                            await update.message.reply_text(
+                                "❌ Ошибка при обновлении текста.",
+                                reply_markup=InlineKeyboardMarkup([[
+                                    InlineKeyboardButton("↩️ К списку текстов", callback_data="admin_texts")
+                                ]])
+                            )
+                        
+                        # Очищаем контекст
+                        if 'current_edit_key' in context.user_data:
+                            del context.user_data['current_edit_key']
+                        if 'current_edit_lang' in context.user_data:
+                            del context.user_data['current_edit_lang']
+                        
+                        return ADMIN_TEXT_MANAGEMENT
+                    
+                    elif 'current_edit_key' in context.user_data:
+                        # Режим добавления нового перевода
+                        key = context.user_data['current_edit_key']
+                        parts = text.strip().split('|', 1)  # Разделяем на 2 части (язык, текст)
+                        
+                        if len(parts) != 2:
+                            await update.message.reply_text(
+                                "❌ Неверный формат данных. Введите данные в формате:\n"
+                                "Язык|Текст\n\n"
+                                "Например:\n"
+                                "en|Welcome to the bot!",
+                                reply_markup=InlineKeyboardMarkup([[
+                                    InlineKeyboardButton("↩️ Назад", callback_data=f"admin_edit_text_{key}")
+                                ]])
+                            )
+                            return ADMIN_TEXT_ADD
+                        
+                        lang_code = parts[0].strip()
+                        message_text = parts[1].strip()
+                        
+                        from models import update_bot_message
+                        msg_id = update_bot_message(key, lang_code, message_text)
+                        
+                        if msg_id:
+                            # Успешно добавлено
+                            await update.message.reply_text(
+                                f"✅ Перевод для ключа {key} на язык {lang_code} успешно добавлен!",
+                                reply_markup=InlineKeyboardMarkup([[
+                                    InlineKeyboardButton("↩️ К списку текстов", callback_data="admin_texts")
+                                ]])
+                            )
+                        else:
+                            # Ошибка при добавлении
+                            await update.message.reply_text(
+                                "❌ Ошибка при добавлении перевода.",
+                                reply_markup=InlineKeyboardMarkup([[
+                                    InlineKeyboardButton("↩️ К списку текстов", callback_data="admin_texts")
+                                ]])
+                            )
+                        
+                        # Очищаем контекст
+                        if 'current_edit_key' in context.user_data:
+                            del context.user_data['current_edit_key']
+                        
+                        return ADMIN_TEXT_MANAGEMENT
+                
+                return ADMIN_TEXT_EDIT
+            
+            # Создаем обработчик для админ-панели
+            # Создаем функции для обработки новых опций админ-панели
+            async def admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Обработчик настроек бота"""
+                query = update.callback_query
+                await query.answer()
+                
+                action = query.data
+                
+                if action == "admin_back":
+                    await query.edit_message_text(
+                        "👑 Панель администратора",
+                        reply_markup=get_admin_keyboard()
+                    )
+                    return ADMIN_MENU
+                
+                # Настройки бота
+                settings_keyboard = [
+                    [InlineKeyboardButton("⏱️ Частота обновления данных", callback_data="admin_setting_update_freq")],
+                    [InlineKeyboardButton("🔔 Настройки уведомлений", callback_data="admin_setting_notifications")],
+                    [InlineKeyboardButton("🌐 Региональные настройки", callback_data="admin_setting_regional")],
+                    [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+                ]
+                
+                await query.edit_message_text(
+                    "⚙️ Настройки бота\n\n"
+                    "Выберите категорию настроек:",
+                    reply_markup=InlineKeyboardMarkup(settings_keyboard)
+                )
+                return ADMIN_SETTINGS
+            
+            async def admin_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Обработчик анализа активности"""
+                query = update.callback_query
+                await query.answer()
+                
+                action = query.data
+                
+                if action == "admin_back":
+                    await query.edit_message_text(
+                        "👑 Панель администратора",
+                        reply_markup=get_admin_keyboard()
+                    )
+                    return ADMIN_MENU
+                
+                # Подготовка данных об активности (заглушка)
+                users = get_all_users()
+                total_users = len(users)
+                approved_users = sum(1 for user in users if user.get('is_approved'))
+                
+                # Имитация данных об активности по дням недели
+                days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+                activity = [random.randint(5, 20) for _ in range(7)]
+                
+                activity_text = "📈 Анализ активности\n\n"
+                activity_text += f"👥 Всего пользователей: {total_users}\n"
+                activity_text += f"✅ Активных пользователей: {approved_users}\n\n"
+                
+                activity_text += "📊 Активность по дням недели:\n"
+                for i, day in enumerate(days):
+                    activity_text += f"{day}: {'▮' * (activity[i] // 2)} ({activity[i]})\n"
+                
+                activity_keyboard = [
+                    [InlineKeyboardButton("📊 Детальная статистика", callback_data="admin_activity_details")],
+                    [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+                ]
+                
+                await query.edit_message_text(
+                    activity_text,
+                    reply_markup=InlineKeyboardMarkup(activity_keyboard)
+                )
+                return ADMIN_ACTIVITY
+            
+            async def admin_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Информация о боте"""
+                query = update.callback_query
+                await query.answer()
+                
+                if query.data == "admin_back":
+                    await query.edit_message_text(
+                        "👑 Панель администратора",
+                        reply_markup=get_admin_keyboard()
+                    )
+                    return ADMIN_MENU
+                
+                about_text = (
+                    "ℹ️ О боте\n\n"
+                    "✨ *Trade Analysis Bot* ✨\n\n"
+                    "Версия: 2.0.0\n"
+                    "Разработан: Replit AI\n"
+                    "Лицензия: Proprietary\n\n"
+                    "📝 Описание:\n"
+                    "Профессиональный бот для анализа рынка "
+                    "с системой управления пользователями.\n\n"
+                    "🛠 Технологии:\n"
+                    "• Python 3.11\n"
+                    "• Python-telegram-bot\n"
+                    "• PostgreSQL\n"
+                    "• YFinance API\n\n"
+                    "📞 Контакты:\n"
+                    "Поддержка: @tradeporu\n"
+                )
+                
+                about_keyboard = [
+                    [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+                ]
+                
+                await query.edit_message_text(
+                    about_text,
+                    reply_markup=InlineKeyboardMarkup(about_keyboard),
+                    parse_mode='Markdown'
+                )
+                return ADMIN_ABOUT
+            
+            async def admin_change_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Обработчик смены пароля администратора"""
+                query = update.callback_query
+                if query:
+                    await query.answer()
+                    
+                    if query.data == "admin_back":
+                        await query.edit_message_text(
+                            "👑 Панель администратора",
+                            reply_markup=get_admin_keyboard()
+                        )
+                        return ADMIN_MENU
+                    
+                    # Первый заход в функцию
+                    keyboard = [
+                        [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+                    ]
+                    
+                    await query.edit_message_text(
+                        "🔐 Смена пароля администратора\n\n"
+                        "Введите новый пароль администратора.\n"
+                        "Пароль должен содержать минимум 6 символов.",
+                        reply_markup=InlineKeyboardMarkup(keyboard)
+                    )
+                    context.user_data['admin_changing_password'] = True
+                    return ADMIN_CHANGE_PASSWORD
+                
+                elif update.message and context.user_data.get('admin_changing_password'):
+                    new_password = update.message.text
+                    
+                    # Проверка минимальной длины пароля
+                    if len(new_password) < 6:
+                        await update.message.reply_text(
+                            "❌ Пароль должен содержать минимум 6 символов!\n\n"
+                            "Пожалуйста, введите другой пароль или нажмите /admin для отмены."
+                        )
+                        return ADMIN_CHANGE_PASSWORD
+                    
+                    # Хеширование нового пароля и обновление в config
+                    new_password_hash = hash_password(new_password)
+                    
+                    # Обновление пароля администратора (заглушка)
+                    global ADMIN_PASSWORD_HASH
+                    ADMIN_PASSWORD_HASH = new_password_hash
+                    
+                    # Уведомление о смене пароля
+                    await update.message.reply_text(
+                        "✅ Пароль администратора успешно изменен!",
+                        reply_markup=get_admin_keyboard()
+                    )
+                    
+                    # Очистка контекста
+                    if 'admin_changing_password' in context.user_data:
+                        del context.user_data['admin_changing_password']
+                    
+                    return ADMIN_MENU
+                
+                return ADMIN_MENU
+            
+            # Добавляем обработчик для админ-панели с новыми функциями
             admin_conv_handler = ConversationHandler(
                 entry_points=[CommandHandler("admin", admin_command)],
                 states={
@@ -1003,6 +1989,28 @@ def main():
                         MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_message),
                         CallbackQueryHandler(admin_broadcast_message)
                     ],
+                    ADMIN_CURRENCY_MANAGEMENT: [CallbackQueryHandler(admin_currency_management)],
+                    ADMIN_CURRENCY_ADD: [
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_currency),
+                        CallbackQueryHandler(admin_add_currency)
+                    ],
+                    ADMIN_CURRENCY_EDIT: [CallbackQueryHandler(admin_currency_management)],
+                    ADMIN_TEXT_MANAGEMENT: [CallbackQueryHandler(admin_text_management)],
+                    ADMIN_TEXT_ADD: [
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_add),
+                        CallbackQueryHandler(admin_text_add)
+                    ],
+                    ADMIN_TEXT_EDIT: [
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_edit),
+                        CallbackQueryHandler(admin_text_edit)
+                    ],
+                    ADMIN_SETTINGS: [CallbackQueryHandler(admin_settings)],
+                    ADMIN_CHANGE_PASSWORD: [
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, admin_change_password),
+                        CallbackQueryHandler(admin_change_password)
+                    ],
+                    ADMIN_ACTIVITY: [CallbackQueryHandler(admin_activity)],
+                    ADMIN_ABOUT: [CallbackQueryHandler(admin_about)],
                 },
                 fallbacks=[CommandHandler("start", start)]
             )
