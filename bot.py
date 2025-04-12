@@ -2343,10 +2343,14 @@ def main():
                 # Устанавливаем состояние для ожидания файла
                 context.user_data['waiting_for_import'] = True
                 
+                # Экранируем специальные символы для MarkdownV2
+                for char in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+                    import_text = import_text.replace(char, f"\\{char}")
+                
                 await query.edit_message_text(
                     import_text,
                     reply_markup=InlineKeyboardMarkup(import_keyboard),
-                    parse_mode='Markdown'
+                    parse_mode='MarkdownV2'
                 )
                 return ADMIN_IMPORT_DATA
                 
@@ -2613,10 +2617,14 @@ def main():
                     [InlineKeyboardButton("↩️ Назад к меню", callback_data="admin_back")]
                 ]
                 
+                # Экранируем специальные символы для MarkdownV2
+                for char in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+                    update_text = update_text.replace(char, f"\\{char}")
+                
                 await query.edit_message_text(
                     update_text,
                     reply_markup=InlineKeyboardMarkup(update_keyboard),
-                    parse_mode='Markdown'
+                    parse_mode='MarkdownV2'
                 )
                 return ADMIN_MENU
                 
