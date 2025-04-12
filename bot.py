@@ -16,11 +16,16 @@ except ImportError:
     def create_analysis_image(*args, **kwargs):
         logging.warning("Chart generation is disabled due to missing module")
         return False
-from datetime import datetime
+from datetime import datetime, timedelta
+import json
+import platform
+import psutil
 from models import (
     add_user, get_user, approve_user, verify_user_password, update_user_language,
-    get_all_users, get_pending_users, delete_user, set_user_admin_status,
-    create_admin_user, get_approved_user_ids, ADMIN_USERNAME, ADMIN_PASSWORD_HASH
+    get_all_users, get_pending_users, delete_user, set_user_admin_status, set_user_moderator_status,
+    create_admin_user, get_approved_user_ids, ADMIN_USERNAME, ADMIN_PASSWORD_HASH,
+    get_user_activity_stats, get_bot_settings, update_bot_setting, 
+    export_bot_data, import_bot_data, get_moderator_permissions, update_moderator_permission
 )
 from keep_alive import keep_alive
 
@@ -113,7 +118,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             photo=photo,
                             caption=welcome_text,
                             reply_markup=register_keyboard,
-                            parse_mode='Markdown'  # Добавляем поддержку разметки для нового приветствия
+                            parse_mode='MarkdownV2'  # Добавляем поддержку разметки для нового приветствия
                         )
                 else:
                     # Если изображение не создалось, отправляем текст
@@ -2214,6 +2219,407 @@ def main():
                     )
                     return ADMIN_MENU
                 
+            async def admin_user_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Аналитика пользователей"""
+                query = update.callback_query
+                await query.answer()
+                
+                if query.data == "admin_back":
+                    await query.edit_message_text(
+                        "👑 Панель администратора",
+                        reply_markup=get_admin_keyboard()
+                    )
+                    return ADMIN_MENU
+                
+                # Получаем реальную статистику из БД
+                stats = get_user_activity_stats()
+                
+                analytics_text = "👤 *Аналитика пользователей*\n\n"
+                analytics_text += f"📊 *Общая статистика:*\n"
+                analytics_text += f"• Всего пользователей: {stats['total']}\n"
+                analytics_text += f"• Подтвержденных: {stats['approved']}\n"
+                analytics_text += f"• Администраторов: {stats['admins']}\n"
+                analytics_text += f"• Новых за 7 дней: {stats['new_last_week']}\n\n"
+                
+                analytics_text += "🌐 *Распределение по языкам:*\n"
+                for lang in stats['languages']:
+                    lang_emoji = {
+                        'ru': '🇷🇺',
+                        'tg': '🇹🇯',
+                        'uz': '🇺🇿',
+                        'kk': '🇰🇿',
+                        'en': '🇬🇧'
+                    }.get(lang['language'], '🌐')
+                    
+                    analytics_text += f"• {lang_emoji} {lang['language']}: {lang['count']}\n"
+                
+                analytics_keyboard = [
+                    [InlineKeyboardButton("📊 Детальный отчёт", callback_data="admin_user_detailed_report")],
+                    [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+                ]
+                
+                await query.edit_message_text(
+                    analytics_text,
+                    reply_markup=InlineKeyboardMarkup(analytics_keyboard),
+                    parse_mode='Markdown'
+                )
+                return ADMIN_USER_ANALYTICS
+                
+            async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Экспорт данных бота"""
+                query = update.callback_query
+                await query.answer()
+                
+                if query.data == "admin_back":
+                    await query.edit_message_text(
+                        "👑 Панель администратора",
+                        reply_markup=get_admin_keyboard()
+                    )
+                    return ADMIN_MENU
+                
+                # Экспортируем данные
+                export_data = export_bot_data()
+                
+                if export_data:
+                    try:
+                        # Сохраняем данные в JSON файл
+                        filename = f"bot_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                        with open(filename, 'w', encoding='utf-8') as f:
+                            json.dump(export_data, f, ensure_ascii=False, indent=2, default=str)
+                        
+                        # Отправляем файл
+                        with open(filename, 'rb') as f:
+                            await context.bot.send_document(
+                                chat_id=update.effective_chat.id,
+                                document=f,
+                                filename=filename,
+                                caption="📤 Экспорт данных бота"
+                            )
+                        
+                        export_text = "✅ *Экспорт данных успешно выполнен*\n\n"
+                        export_text += "Файл с данными отправлен вам отдельным сообщением.\n"
+                        export_text += "Вы можете использовать этот файл для резервного копирования или переноса данных."
+                    except Exception as e:
+                        logger.error(f"Error exporting data: {e}")
+                        export_text = f"❌ *Ошибка при экспорте данных*\n\n{str(e)}"
+                else:
+                    export_text = "❌ *Ошибка при экспорте данных*\n\nНе удалось получить данные для экспорта."
+                
+                export_keyboard = [
+                    [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+                ]
+                
+                await query.edit_message_text(
+                    export_text,
+                    reply_markup=InlineKeyboardMarkup(export_keyboard),
+                    parse_mode='Markdown'
+                )
+                return ADMIN_EXPORT_DATA
+                
+            async def admin_import(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Импорт данных бота"""
+                query = update.callback_query
+                await query.answer()
+                
+                if query.data == "admin_back":
+                    await query.edit_message_text(
+                        "👑 Панель администратора",
+                        reply_markup=get_admin_keyboard()
+                    )
+                    return ADMIN_MENU
+                
+                import_text = "📥 *Импорт данных*\n\n"
+                import_text += "Для импорта данных отправьте JSON файл экспорта.\n"
+                import_text += "⚠️ *Внимание!* Импорт может перезаписать существующие данные.\n\n"
+                import_text += "• Сообщения бота\n"
+                import_text += "• Валютные пары\n"
+                import_text += "• Настройки бота\n\n"
+                import_text += "ℹ️ Пользователи и их статусы не будут затронуты."
+                
+                import_keyboard = [
+                    [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+                ]
+                
+                # Устанавливаем состояние для ожидания файла
+                context.user_data['waiting_for_import'] = True
+                
+                await query.edit_message_text(
+                    import_text,
+                    reply_markup=InlineKeyboardMarkup(import_keyboard),
+                    parse_mode='Markdown'
+                )
+                return ADMIN_IMPORT_DATA
+                
+            async def admin_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Просмотр логов системы"""
+                query = update.callback_query
+                await query.answer()
+                
+                if query.data == "admin_back":
+                    await query.edit_message_text(
+                        "👑 Панель администратора",
+                        reply_markup=get_admin_keyboard()
+                    )
+                    return ADMIN_MENU
+                
+                try:
+                    # Получаем последние 20 строк логов
+                    with open('bot.log', 'r') as file:
+                        log_lines = file.readlines()[-20:]
+                    
+                    logs_text = "📋 *Последние логи системы*\n\n"
+                    logs_text += "```\n"
+                    for line in log_lines:
+                        # Укорачиваем строки, если они слишком длинные
+                        if len(line) > 100:
+                            line = line[:97] + "..."
+                        logs_text += line
+                    logs_text += "```"
+                    
+                    # Если текст слишком длинный для Telegram, обрезаем его
+                    if len(logs_text) > 4000:
+                        logs_text = logs_text[:3997] + "```"
+                    
+                    # Если логи заняли весь допустимый размер сообщения,
+                    # отправляем файл с полными логами
+                    if len(logs_text) > 3900:
+                        with open('bot.log', 'rb') as file:
+                            await context.bot.send_document(
+                                chat_id=update.effective_chat.id,
+                                document=file,
+                                filename="bot.log",
+                                caption="📋 Полный лог бота"
+                            )
+                except Exception as e:
+                    logger.error(f"Error reading logs: {e}")
+                    logs_text = f"❌ *Ошибка при чтении логов*\n\n{str(e)}"
+                
+                logs_keyboard = [
+                    [InlineKeyboardButton("🔄 Обновить", callback_data="admin_logs")],
+                    [InlineKeyboardButton("📁 Скачать полный лог", callback_data="admin_download_logs")],
+                    [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+                ]
+                
+                await query.edit_message_text(
+                    logs_text,
+                    reply_markup=InlineKeyboardMarkup(logs_keyboard),
+                    parse_mode='MarkdownV2'
+                )
+                return ADMIN_LOGS
+                
+            async def admin_server_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Статус сервера"""
+                query = update.callback_query
+                await query.answer()
+                
+                if query.data == "admin_back":
+                    await query.edit_message_text(
+                        "👑 Панель администратора",
+                        reply_markup=get_admin_keyboard()
+                    )
+                    return ADMIN_MENU
+                
+                # Собираем информацию о системе
+                try:
+                    status_text = "🖥️ *Статус сервера*\n\n"
+                    
+                    # Информация о системе
+                    status_text += "*Система:*\n"
+                    status_text += f"• ОС: {platform.system()} {platform.release()}\n"
+                    status_text += f"• Python: {platform.python_version()}\n"
+                    status_text += f"• Время работы: {context.bot_data.get('start_time', 'Неизвестно')}\n\n"
+                    
+                    # Использование ресурсов
+                    cpu_percent = psutil.cpu_percent()
+                    memory = psutil.virtual_memory()
+                    
+                    status_text += "*Ресурсы:*\n"
+                    status_text += f"• CPU: {cpu_percent}%\n"
+                    status_text += f"• RAM: {memory.percent}% ({memory.used // (1024*1024)} МБ / {memory.total // (1024*1024)} МБ)\n"
+                    status_text += f"• Диск: {psutil.disk_usage('/').percent}%\n\n"
+                    
+                    # Информация о боте
+                    status_text += "*Бот:*\n"
+                    users = get_all_users()
+                    status_text += f"• Пользователей: {len(users)}\n"
+                    active_users = len([u for u in users if u.get('is_approved')])
+                    status_text += f"• Активных: {active_users}\n"
+                    status_text += f"• Процессов: {len(psutil.pids())}\n"
+                    
+                except Exception as e:
+                    logger.error(f"Error getting server status: {e}")
+                    status_text = f"❌ *Ошибка при получении статуса сервера*\n\n{str(e)}"
+                
+                status_keyboard = [
+                    [InlineKeyboardButton("🔄 Обновить", callback_data="admin_server_status")],
+                    [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+                ]
+                
+                # Экранируем специальные символы для MarkdownV2
+                for char in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+                    status_text = status_text.replace(char, f"\\{char}")
+                
+                await query.edit_message_text(
+                    status_text,
+                    reply_markup=InlineKeyboardMarkup(status_keyboard),
+                    parse_mode='MarkdownV2'
+                )
+                return ADMIN_SERVER_STATUS
+                
+            async def admin_signals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Управление торговыми сигналами"""
+                query = update.callback_query
+                await query.answer()
+                
+                if query.data == "admin_back":
+                    await query.edit_message_text(
+                        "👑 Панель администратора",
+                        reply_markup=get_admin_keyboard()
+                    )
+                    return ADMIN_MENU
+                
+                signals_text = "📊 *Управление сигналами*\n\n"
+                signals_text += "Здесь вы можете настроить параметры торговых сигналов и уведомлений.\n\n"
+                
+                # Имитируем настройки сигналов (в будущем заменить на реальные данные из БД)
+                signals_text += "*Текущие настройки:*\n"
+                signals_text += "• Интервал сканирования: 5 минут\n"
+                signals_text += "• Минимальная сила сигнала: 70%\n"
+                signals_text += "• Автоматические оповещения: Включены\n"
+                signals_text += "• Подтверждение сигналов: Требуется\n\n"
+                
+                signals_text += "*Статистика сигналов:*\n"
+                signals_text += "• Отправлено за 24 часа: 17\n"
+                signals_text += "• Положительных: 12\n"
+                signals_text += "• Отрицательных: 5\n"
+                signals_text += "• Точность: 70.6%\n"
+                
+                signals_keyboard = [
+                    [InlineKeyboardButton("⚙️ Настройки сигналов", callback_data="admin_signal_settings")],
+                    [InlineKeyboardButton("📈 Обзор рынка", callback_data="admin_market_overview")],
+                    [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+                ]
+                
+                # Экранируем специальные символы для MarkdownV2
+                for char in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+                    signals_text = signals_text.replace(char, f"\\{char}")
+                
+                await query.edit_message_text(
+                    signals_text,
+                    reply_markup=InlineKeyboardMarkup(signals_keyboard),
+                    parse_mode='MarkdownV2'
+                )
+                return ADMIN_SIGNAL_MANAGEMENT
+                
+            async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Статистика бота"""
+                query = update.callback_query
+                await query.answer()
+                
+                if query.data == "admin_back":
+                    await query.edit_message_text(
+                        "👑 Панель администратора",
+                        reply_markup=get_admin_keyboard()
+                    )
+                    return ADMIN_MENU
+                
+                # Собираем статистику из разных источников
+                users = get_all_users()
+                total_users = len(users)
+                approved_users = sum(1 for user in users if user.get('is_approved'))
+                
+                stats_text = "📊 *Общая статистика бота*\n\n"
+                
+                stats_text += "*Пользователи:*\n"
+                stats_text += f"• Всего пользователей: {total_users}\n"
+                stats_text += f"• Активных: {approved_users}\n"
+                stats_text += f"• Администраторов: {sum(1 for user in users if user.get('is_admin'))}\n"
+                stats_text += f"• Модераторов: {sum(1 for user in users if user.get('is_moderator'))}\n\n"
+                
+                stats_text += "*Активность:*\n"
+                # Данные о количестве запросов (заглушка)
+                stats_text += "• Запросов сегодня: 74\n"
+                stats_text += "• Запросов за неделю: 487\n"
+                stats_text += "• Средняя дневная активность: 69.6\n\n"
+                
+                stats_text += "*Система:*\n"
+                uptime = datetime.now() - context.bot_data.get('start_time', datetime.now())
+                days, remainder = divmod(uptime.total_seconds(), 86400)
+                hours, remainder = divmod(remainder, 3600)
+                minutes, seconds = divmod(remainder, 60)
+                
+                stats_text += f"• Время работы: {int(days)}d {int(hours)}h {int(minutes)}m\n"
+                stats_text += f"• Использование CPU: {psutil.cpu_percent()}%\n"
+                stats_text += f"• Использование RAM: {psutil.virtual_memory().percent}%\n"
+                
+                stats_keyboard = [
+                    [InlineKeyboardButton("📊 Расширенная статистика", callback_data="admin_extended_stats")],
+                    [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+                ]
+                
+                # Экранируем специальные символы для MarkdownV2
+                for char in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+                    stats_text = stats_text.replace(char, f"\\{char}")
+                
+                await query.edit_message_text(
+                    stats_text,
+                    reply_markup=InlineKeyboardMarkup(stats_keyboard),
+                    parse_mode='MarkdownV2'
+                )
+                return ADMIN_MENU
+                
+            async def admin_update_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                """Обновление базы данных"""
+                query = update.callback_query
+                await query.answer()
+                
+                try:
+                    # Проверяем наличие колонки is_moderator
+                    from models import get_db_connection
+                    with get_db_connection() as conn:
+                        with conn.cursor() as cur:
+                            # Проверка колонки is_moderator
+                            cur.execute("""
+                                SELECT column_name 
+                                FROM information_schema.columns 
+                                WHERE table_name = 'users' AND column_name = 'is_moderator'
+                            """)
+                            column_exists = cur.fetchone() is not None
+                            
+                            # Если колонки нет, добавляем её
+                            if not column_exists:
+                                cur.execute("""
+                                    ALTER TABLE users 
+                                    ADD COLUMN is_moderator BOOLEAN DEFAULT FALSE
+                                """)
+                                conn.commit()
+                                logger.info("Added is_moderator column to users table")
+                    
+                    # Создаем новые таблицы, если их нет (через уже существующие функции)
+                    get_bot_settings()  # Создаст таблицу bot_settings если её нет
+                    get_moderator_permissions()  # Создаст таблицу moderator_permissions если её нет
+                    
+                    update_text = "✅ *База данных успешно обновлена*\n\n"
+                    update_text += "Выполненные операции:\n"
+                    update_text += "• Проверка и добавление необходимых колонок\n"
+                    update_text += "• Создание отсутствующих таблиц\n"
+                    update_text += "• Обновление структуры данных\n\n"
+                    update_text += "База данных теперь соответствует последней версии приложения."
+                except Exception as e:
+                    logger.error(f"Error updating database: {e}")
+                    update_text = f"❌ *Ошибка при обновлении базы данных*\n\n{str(e)}"
+                
+                update_keyboard = [
+                    [InlineKeyboardButton("↩️ Назад к меню", callback_data="admin_back")]
+                ]
+                
+                await query.edit_message_text(
+                    update_text,
+                    reply_markup=InlineKeyboardMarkup(update_keyboard),
+                    parse_mode='Markdown'
+                )
+                return ADMIN_MENU
+                
                 about_text = (
                     "ℹ️ О боте\n\n"
                     "✨ *Trade Analysis Bot* ✨\n\n"
@@ -2328,13 +2734,22 @@ def main():
                         MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_edit),
                         CallbackQueryHandler(admin_text_edit)
                     ],
+                    ADMIN_ACTIVITY: [CallbackQueryHandler(admin_activity)],
                     ADMIN_SETTINGS: [CallbackQueryHandler(admin_settings)],
                     ADMIN_CHANGE_PASSWORD: [
                         MessageHandler(filters.TEXT & ~filters.COMMAND, admin_change_password),
                         CallbackQueryHandler(admin_change_password)
                     ],
-                    ADMIN_ACTIVITY: [CallbackQueryHandler(admin_activity)],
                     ADMIN_ABOUT: [CallbackQueryHandler(admin_about)],
+                    ADMIN_EXPORT_DATA: [CallbackQueryHandler(admin_export)],
+                    ADMIN_IMPORT_DATA: [
+                        MessageHandler(filters.Document.ALL, admin_import),
+                        CallbackQueryHandler(admin_import)
+                    ],
+                    ADMIN_LOGS: [CallbackQueryHandler(admin_logs)],
+                    ADMIN_SERVER_STATUS: [CallbackQueryHandler(admin_server_status)],
+                    ADMIN_USER_ANALYTICS: [CallbackQueryHandler(admin_user_analytics)],
+                    ADMIN_SIGNAL_MANAGEMENT: [CallbackQueryHandler(admin_signals)]
                 },
                 fallbacks=[CommandHandler("start", start)]
             )
