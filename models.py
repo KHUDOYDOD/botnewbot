@@ -31,6 +31,25 @@ def init_db():
                 )
             """)
             
+            # Проверка наличия колонки is_moderator и добавление, если её нет
+            try:
+                cur.execute("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'users' AND column_name = 'is_moderator'
+                """)
+                column_exists = cur.fetchone() is not None
+                
+                if not column_exists:
+                    cur.execute("""
+                        ALTER TABLE users 
+                        ADD COLUMN is_moderator BOOLEAN DEFAULT FALSE
+                    """)
+                    conn.commit()
+                    logger.info("Added is_moderator column to users table")
+            except Exception as e:
+                logger.error(f"Error checking or adding is_moderator column: {e}")
+            
             # Таблица для хранения валютных пар
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS currency_pairs (
@@ -96,22 +115,46 @@ def get_user(user_id: int):
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT user_id, username, is_admin, is_approved, password_hash, language_code, is_moderator
-                    FROM users
-                    WHERE user_id = %s
-                """, (user_id,))
-                result = cur.fetchone()
-                if result:
-                    return {
-                        'user_id': result[0],
-                        'username': result[1],
-                        'is_admin': result[2],
-                        'is_approved': result[3],
-                        'password_hash': result[4],
-                        'language_code': result[5],
-                        'is_moderator': result[6]
-                    }
+                # Сначала проверяем, существует ли колонка is_moderator
+                try:
+                    cur.execute("""
+                        SELECT user_id, username, is_admin, is_approved, password_hash, language_code, is_moderator
+                        FROM users
+                        WHERE user_id = %s
+                    """, (user_id,))
+                    result = cur.fetchone()
+                    if result:
+                        return {
+                            'user_id': result[0],
+                            'username': result[1],
+                            'is_admin': result[2],
+                            'is_approved': result[3],
+                            'password_hash': result[4],
+                            'language_code': result[5],
+                            'is_moderator': result[6]
+                        }
+                except Exception as column_error:
+                    # Если колонка не существует, используем запрос без нее
+                    if 'column "is_moderator" does not exist' in str(column_error):
+                        cur.execute("""
+                            SELECT user_id, username, is_admin, is_approved, password_hash, language_code
+                            FROM users
+                            WHERE user_id = %s
+                        """, (user_id,))
+                        result = cur.fetchone()
+                        if result:
+                            return {
+                                'user_id': result[0],
+                                'username': result[1],
+                                'is_admin': result[2],
+                                'is_approved': result[3],
+                                'password_hash': result[4],
+                                'language_code': result[5],
+                                'is_moderator': False  # По умолчанию не модератор
+                            }
+                    else:
+                        # Если это другая ошибка, поднимаем ее снова
+                        raise
                 return None
     except Exception as e:
         logger.error(f"Error getting user: {e}")
@@ -172,22 +215,46 @@ def get_all_users():
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT user_id, username, is_admin, is_approved, created_at, is_moderator
-                    FROM users
-                    ORDER BY created_at DESC
-                """)
-                users = []
-                for row in cur.fetchall():
-                    users.append({
-                        'user_id': row[0],
-                        'username': row[1],
-                        'is_admin': row[2],
-                        'is_approved': row[3],
-                        'created_at': row[4],
-                        'is_moderator': row[5]
-                    })
-                return users
+                try:
+                    # Пробуем запрос с is_moderator
+                    cur.execute("""
+                        SELECT user_id, username, is_admin, is_approved, created_at, is_moderator
+                        FROM users
+                        ORDER BY created_at DESC
+                    """)
+                    users = []
+                    for row in cur.fetchall():
+                        users.append({
+                            'user_id': row[0],
+                            'username': row[1],
+                            'is_admin': row[2],
+                            'is_approved': row[3],
+                            'created_at': row[4],
+                            'is_moderator': row[5]
+                        })
+                    return users
+                except Exception as column_error:
+                    # Если колонка не существует, используем запрос без нее
+                    if 'column "is_moderator" does not exist' in str(column_error):
+                        cur.execute("""
+                            SELECT user_id, username, is_admin, is_approved, created_at
+                            FROM users
+                            ORDER BY created_at DESC
+                        """)
+                        users = []
+                        for row in cur.fetchall():
+                            users.append({
+                                'user_id': row[0],
+                                'username': row[1],
+                                'is_admin': row[2],
+                                'is_approved': row[3],
+                                'created_at': row[4],
+                                'is_moderator': False  # По умолчанию не модератор
+                            })
+                        return users
+                    else:
+                        # Если это другая ошибка, поднимаем ее снова
+                        raise
     except Exception as e:
         logger.error(f"Error getting all users: {e}")
         return []
@@ -285,14 +352,42 @@ def set_user_moderator_status(user_id: int, is_moderator: bool):
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE users
-                    SET is_moderator = %s
-                    WHERE user_id = %s
-                    RETURNING user_id
-                """, (is_moderator, user_id))
-                conn.commit()
-                return cur.fetchone() is not None
+                try:
+                    # Пробуем обновить, если колонка существует
+                    cur.execute("""
+                        UPDATE users
+                        SET is_moderator = %s
+                        WHERE user_id = %s
+                        RETURNING user_id
+                    """, (is_moderator, user_id))
+                    conn.commit()
+                    result = cur.fetchone()
+                    return result is not None
+                except Exception as column_error:
+                    # Если колонка не существует, добавляем ее и пробуем снова
+                    if 'column "is_moderator" does not exist' in str(column_error):
+                        conn.rollback()  # Откатываем транзакцию перед созданием колонки
+                        
+                        # Добавляем колонку is_moderator
+                        cur.execute("""
+                            ALTER TABLE users 
+                            ADD COLUMN IF NOT EXISTS is_moderator BOOLEAN DEFAULT FALSE
+                        """)
+                        conn.commit()
+                        
+                        # Теперь пробуем обновить снова
+                        cur.execute("""
+                            UPDATE users
+                            SET is_moderator = %s
+                            WHERE user_id = %s
+                            RETURNING user_id
+                        """, (is_moderator, user_id))
+                        conn.commit()
+                        result = cur.fetchone()
+                        return result is not None
+                    else:
+                        # Если это другая ошибка, поднимаем ее снова
+                        raise
     except Exception as e:
         logger.error(f"Error setting moderator status: {e}")
         return False
@@ -551,6 +646,258 @@ def import_default_currency_pairs():
                 return False
     except Exception as e:
         logger.error(f"Error importing default currency pairs: {e}")
+        return False
+
+# Новые функции для аналитики пользователей
+def get_user_activity_stats():
+    """Получить статистику активности пользователей"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Получаем общее количество пользователей
+                cur.execute("""
+                    SELECT 
+                        COUNT(*) as total,
+                        SUM(CASE WHEN is_approved = TRUE THEN 1 ELSE 0 END) as approved,
+                        SUM(CASE WHEN is_admin = TRUE THEN 1 ELSE 0 END) as admins,
+                        COUNT(CASE WHEN created_at > (CURRENT_TIMESTAMP - INTERVAL '7 day') THEN 1 END) as new_last_week
+                    FROM users
+                """)
+                stats = cur.fetchone()
+                
+                # Получаем количество пользователей по языкам
+                cur.execute("""
+                    SELECT 
+                        language_code,
+                        COUNT(*) as count
+                    FROM users
+                    GROUP BY language_code
+                    ORDER BY count DESC
+                """)
+                languages = []
+                for row in cur.fetchall():
+                    languages.append({
+                        'language': row[0],
+                        'count': row[1]
+                    })
+                
+                return {
+                    'total': stats[0] if stats else 0,
+                    'approved': stats[1] if stats else 0,
+                    'admins': stats[2] if stats else 0,
+                    'new_last_week': stats[3] if stats else 0,
+                    'languages': languages
+                }
+    except Exception as e:
+        logger.error(f"Error getting user activity stats: {e}")
+        return {
+            'total': 0,
+            'approved': 0,
+            'admins': 0,
+            'new_last_week': 0,
+            'languages': []
+        }
+
+# Функции для управления режимом обслуживания
+def get_bot_settings():
+    """Получить настройки бота из базы данных"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Создаем таблицу настроек, если её еще нет
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS bot_settings (
+                        key VARCHAR(50) PRIMARY KEY,
+                        value TEXT,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.commit()
+                
+                # Получаем все настройки
+                cur.execute("""
+                    SELECT key, value, updated_at
+                    FROM bot_settings
+                """)
+                
+                settings = {}
+                for row in cur.fetchall():
+                    settings[row[0]] = {
+                        'value': row[1],
+                        'updated_at': row[2]
+                    }
+                
+                # Если нет настройки режима обслуживания, создаем её со значением "off"
+                if 'maintenance_mode' not in settings:
+                    cur.execute("""
+                        INSERT INTO bot_settings (key, value)
+                        VALUES ('maintenance_mode', 'off')
+                    """)
+                    conn.commit()
+                    settings['maintenance_mode'] = {
+                        'value': 'off',
+                        'updated_at': datetime.now()
+                    }
+                
+                return settings
+    except Exception as e:
+        logger.error(f"Error getting bot settings: {e}")
+        return {'maintenance_mode': {'value': 'off', 'updated_at': datetime.now()}}
+
+def update_bot_setting(key, value):
+    """Обновить настройку бота"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO bot_settings (key, value, updated_at)
+                    VALUES (%s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (key) DO UPDATE
+                    SET value = EXCLUDED.value,
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING key
+                """, (key, value))
+                conn.commit()
+                return cur.fetchone() is not None
+    except Exception as e:
+        logger.error(f"Error updating bot setting {key}: {e}")
+        return False
+
+def export_bot_data():
+    """Экспортировать все настраиваемые данные бота"""
+    try:
+        data = {
+            'currency_pairs': get_all_currency_pairs(),
+            'bot_messages': get_all_bot_messages(),
+            'bot_settings': get_bot_settings(),
+            'export_date': datetime.now().isoformat()
+        }
+        return data
+    except Exception as e:
+        logger.error(f"Error exporting bot data: {e}")
+        return None
+
+def import_bot_data(data):
+    """Импортировать настраиваемые данные бота"""
+    try:
+        with get_db_connection() as conn:
+            # Импортируем валютные пары
+            for pair in data.get('currency_pairs', []):
+                add_or_update_currency_pair(
+                    pair['pair_code'],
+                    pair['symbol'],
+                    pair['display_name'],
+                    pair['is_active']
+                )
+            
+            # Импортируем сообщения бота
+            for msg in data.get('bot_messages', []):
+                update_bot_message(
+                    msg['message_key'],
+                    msg['language_code'],
+                    msg['message_text']
+                )
+            
+            # Импортируем настройки бота
+            for key, value_obj in data.get('bot_settings', {}).items():
+                if isinstance(value_obj, dict) and 'value' in value_obj:
+                    update_bot_setting(key, value_obj['value'])
+                else:
+                    update_bot_setting(key, value_obj)
+            
+            return True
+    except Exception as e:
+        logger.error(f"Error importing bot data: {e}")
+        return False
+
+# Функции для управления доступом модераторов
+def get_moderator_permissions():
+    """Получить список разрешений для модераторов"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Создаем таблицу разрешений, если её еще нет
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS moderator_permissions (
+                        id SERIAL PRIMARY KEY,
+                        permission_key VARCHAR(50) UNIQUE NOT NULL,
+                        description TEXT,
+                        is_enabled BOOLEAN DEFAULT TRUE,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                conn.commit()
+                
+                # Получаем все разрешения
+                cur.execute("""
+                    SELECT permission_key, description, is_enabled, updated_at
+                    FROM moderator_permissions
+                    ORDER BY permission_key
+                """)
+                
+                permissions = []
+                for row in cur.fetchall():
+                    permissions.append({
+                        'key': row[0],
+                        'description': row[1],
+                        'is_enabled': row[2],
+                        'updated_at': row[3]
+                    })
+                
+                # Если таблица пуста, добавляем стандартные разрешения
+                if not permissions:
+                    default_permissions = [
+                        ('approve_users', 'Одобрение новых пользователей', True),
+                        ('reject_users', 'Отклонение новых пользователей', True),
+                        ('send_broadcasts', 'Отправка массовых сообщений', False),
+                        ('manage_currency', 'Управление валютными парами', False)
+                    ]
+                    
+                    for perm in default_permissions:
+                        cur.execute("""
+                            INSERT INTO moderator_permissions (permission_key, description, is_enabled)
+                            VALUES (%s, %s, %s)
+                            ON CONFLICT (permission_key) DO NOTHING
+                        """, perm)
+                    
+                    conn.commit()
+                    
+                    # Получаем добавленные разрешения
+                    cur.execute("""
+                        SELECT permission_key, description, is_enabled, updated_at
+                        FROM moderator_permissions
+                        ORDER BY permission_key
+                    """)
+                    
+                    permissions = []
+                    for row in cur.fetchall():
+                        permissions.append({
+                            'key': row[0],
+                            'description': row[1],
+                            'is_enabled': row[2],
+                            'updated_at': row[3]
+                        })
+                
+                return permissions
+    except Exception as e:
+        logger.error(f"Error getting moderator permissions: {e}")
+        return []
+
+def update_moderator_permission(permission_key, is_enabled):
+    """Обновить разрешение для модераторов"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE moderator_permissions
+                    SET is_enabled = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE permission_key = %s
+                    RETURNING permission_key
+                """, (is_enabled, permission_key))
+                conn.commit()
+                return cur.fetchone() is not None
+    except Exception as e:
+        logger.error(f"Error updating moderator permission {permission_key}: {e}")
         return False
 
 # Initialize database tables
