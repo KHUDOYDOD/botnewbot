@@ -12,10 +12,24 @@ def get_language_keyboard():
         keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
-def get_currency_keyboard(current_lang='tg'):
-    """Create keyboard with currency pairs and language change button"""
+def get_currency_keyboard(current_lang='tg', user_data=None):
+    """Create keyboard with currency pairs and language change button
+    Adds admin/moderator buttons if the user has appropriate permissions"""
     keyboard = []
     row = []
+    
+    # Add admin/moderator panel buttons if the user has appropriate permissions
+    if user_data:
+        admin_buttons = []
+        if user_data.get('is_admin'):
+            admin_buttons.append(InlineKeyboardButton("👑 Панель администратора", callback_data="admin_panel"))
+        if user_data.get('is_moderator'):
+            admin_buttons.append(InlineKeyboardButton("🛡️ Панель модератора", callback_data="moderator_panel"))
+        
+        if admin_buttons:
+            # Add admin/moderator buttons at the top
+            for button in admin_buttons:
+                keyboard.append([button])
 
     # Group currency pairs by type
     major_pairs = {k: v for k, v in CURRENCY_PAIRS.items() if '💶' in k or '💷' in k or '💴' in k or '💰' in k}

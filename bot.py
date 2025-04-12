@@ -67,7 +67,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Проверяем подтверждение пользователя
         if user_data and user_data.get('is_approved'):
             # Если пользователь подтвержден, показываем основной интерфейс
-            keyboard = get_currency_keyboard(current_lang=lang_code)
+            # Передаем user_data для отображения админ/модератор кнопок, если у пользователя есть права
+            keyboard = get_currency_keyboard(current_lang=lang_code, user_data=user_data)
             await update.message.reply_text(
                 MESSAGES[lang_code]['WELCOME'],
                 reply_markup=keyboard,
@@ -76,7 +77,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif username and username.lower() == ADMIN_USERNAME.lower():
             # Если это администратор, создаем учетную запись администратора и показываем интерфейс
             create_admin_user(user_id, username)
-            keyboard = get_currency_keyboard(current_lang=lang_code)
+            # Получаем обновленные данные после создания админа
+            user_data = get_user(user_id)
+            keyboard = get_currency_keyboard(current_lang=lang_code, user_data=user_data)
             admin_welcome = f"👑 Вы вошли как администратор @{username}.\n\n"
             await update.message.reply_text(
                 admin_welcome,
@@ -284,7 +287,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data = get_user(user.id)
 
     lang_code = user_data['language_code'] if user_data else 'tg'
-    keyboard = get_currency_keyboard(current_lang=lang_code)
+    keyboard = get_currency_keyboard(current_lang=lang_code, user_data=user_data)
     await update.message.reply_text(
         MESSAGES[lang_code]['WELCOME'],
         reply_markup=keyboard,
@@ -300,8 +303,9 @@ async def handle_language_selection(update: Update, context: ContextTypes.DEFAUL
 
         # Update user's language in database
         if update_user_language(user_id, lang_code):
-            # Get fresh keyboard with new language
-            keyboard = get_currency_keyboard(current_lang=lang_code)
+            # Get fresh keyboard with new language and user data for admin/moderator buttons
+            user_data = get_user(user_id)  # Get updated user data after language change
+            keyboard = get_currency_keyboard(current_lang=lang_code, user_data=user_data)
             welcome_message = MESSAGES[lang_code]['WELCOME']
 
             try:
@@ -376,7 +380,8 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if query.data == "return_to_main":
             lang_code = user_data['language_code'] if user_data else 'tg'
 
-            keyboard = get_currency_keyboard(current_lang=lang_code)
+            # Передаем данные пользователя для отображения админ/модератор кнопок, если есть права
+            keyboard = get_currency_keyboard(current_lang=lang_code, user_data=user_data)
             try:
                 await query.message.delete()
             except Exception:
@@ -604,7 +609,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         photo=photo,
                         caption=result_message,
                         parse_mode='MarkdownV2',
-                        reply_markup=get_currency_keyboard(current_lang=lang_code)
+                        reply_markup=get_currency_keyboard(current_lang=lang_code, user_data=user_data)
                     )
                 await analyzing_message.delete()
             except Exception as img_error:
