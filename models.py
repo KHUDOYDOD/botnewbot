@@ -26,6 +26,7 @@ def init_db():
                     is_approved BOOLEAN DEFAULT FALSE,
                     password_hash VARCHAR(255),
                     language_code VARCHAR(10) DEFAULT 'tg',
+                    is_moderator BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -96,7 +97,7 @@ def get_user(user_id: int):
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT user_id, username, is_admin, is_approved, password_hash, language_code
+                    SELECT user_id, username, is_admin, is_approved, password_hash, language_code, is_moderator
                     FROM users
                     WHERE user_id = %s
                 """, (user_id,))
@@ -108,7 +109,8 @@ def get_user(user_id: int):
                         'is_admin': result[2],
                         'is_approved': result[3],
                         'password_hash': result[4],
-                        'language_code': result[5]
+                        'language_code': result[5],
+                        'is_moderator': result[6]
                     }
                 return None
     except Exception as e:
@@ -171,7 +173,7 @@ def get_all_users():
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT user_id, username, is_admin, is_approved, created_at
+                    SELECT user_id, username, is_admin, is_approved, created_at, is_moderator
                     FROM users
                     ORDER BY created_at DESC
                 """)
@@ -182,7 +184,8 @@ def get_all_users():
                         'username': row[1],
                         'is_admin': row[2],
                         'is_approved': row[3],
-                        'created_at': row[4]
+                        'created_at': row[4],
+                        'is_moderator': row[5]
                     })
                 return users
     except Exception as e:
@@ -277,6 +280,23 @@ def set_user_admin_status(user_id: int, is_admin: bool):
         logger.error(f"Error setting admin status: {e}")
         return False
 
+def set_user_moderator_status(user_id: int, is_moderator: bool):
+    """Установить статус модератора для пользователя."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE users
+                    SET is_moderator = %s
+                    WHERE user_id = %s
+                    RETURNING user_id
+                """, (is_moderator, user_id))
+                conn.commit()
+                return cur.fetchone() is not None
+    except Exception as e:
+        logger.error(f"Error setting moderator status: {e}")
+        return False
+
 def create_admin_user(user_id: int, username: str):
     """Создать админа с предустановленным паролем."""
     try:
@@ -338,7 +358,8 @@ def add_or_update_currency_pair(pair_code: str, symbol: str, display_name: str, 
                     RETURNING id
                 """, (pair_code, symbol, display_name, is_active))
                 conn.commit()
-                return cur.fetchone()[0]
+                result = cur.fetchone()
+                return result[0] if result else None
     except Exception as e:
         logger.error(f"Error adding/updating currency pair: {e}")
         return None
@@ -402,6 +423,45 @@ def get_all_bot_messages():
         logger.error(f"Error getting bot messages: {e}")
         return []
 
+def get_message_for_key(message_key: str):
+    """Получить все сообщения для указанного ключа на всех языках."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, language_code, message_text, updated_at
+                    FROM bot_messages
+                    WHERE message_key = %s
+                    ORDER BY language_code
+                """, (message_key,))
+                messages = []
+                for row in cur.fetchall():
+                    messages.append({
+                        'id': row[0],
+                        'language_code': row[1],
+                        'message_text': row[2],
+                        'updated_at': row[3]
+                    })
+                return messages
+    except Exception as e:
+        logger.error(f"Error getting messages for key {message_key}: {e}")
+        return []
+
+def get_message_keys():
+    """Получить список уникальных ключей сообщений."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT DISTINCT message_key
+                    FROM bot_messages
+                    ORDER BY message_key
+                """)
+                return [row[0] for row in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"Error getting message keys: {e}")
+        return []
+
 def get_bot_message(message_key: str, language_code: str):
     """Получить конкретное сообщение бота."""
     try:
@@ -432,7 +492,8 @@ def update_bot_message(message_key: str, language_code: str, message_text: str):
                     RETURNING id
                 """, (message_key, language_code, message_text))
                 conn.commit()
-                return cur.fetchone()[0]
+                result = cur.fetchone()
+                return result[0] if result else None
     except Exception as e:
         logger.error(f"Error updating bot message: {e}")
         return None
@@ -453,20 +514,6 @@ def delete_bot_message(message_key: str, language_code: str):
         logger.error(f"Error deleting bot message: {e}")
         return False
 
-def get_message_keys():
-    """Получить список уникальных ключей сообщений."""
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT DISTINCT message_key
-                    FROM bot_messages
-                    ORDER BY message_key
-                """)
-                return [row[0] for row in cur.fetchall()]
-    except Exception as e:
-        logger.error(f"Error getting message keys: {e}")
-        return []
 
 def import_default_currency_pairs():
     """Импортировать валютные пары по умолчанию, если таблица пуста."""
@@ -509,5 +556,78 @@ def import_default_currency_pairs():
 # Initialize database tables
 init_db()
 
+# Функция для импорта стандартных сообщений бота
+def import_default_bot_messages():
+    """Импортировать стандартные сообщения бота, если таблица пуста."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Проверяем, есть ли уже какие-то сообщения
+                cur.execute("SELECT COUNT(*) FROM bot_messages")
+                result = cur.fetchone()
+                count = result[0] if result else 0
+                
+                if count == 0:
+                    # Добавляем стандартные сообщения на разных языках
+                    default_messages = [
+                        # welcome_message - приветственное сообщение
+                        ("welcome_message", "ru", "Добро пожаловать в бот анализа рынка! Выберите валютную пару для анализа."),
+                        ("welcome_message", "tg", "Ба боти таҳлили бозор хуш омадед! Ҷуфти асъорро барои таҳлил интихоб кунед."),
+                        ("welcome_message", "uz", "Market tahlili botiga xush kelibsiz! Tahlil qilish uchun valyuta juftligini tanlang."),
+                        ("welcome_message", "kk", "Нарық талдау ботына қош келдіңіз! Талдау үшін валюта жұбын таңдаңыз."),
+                        ("welcome_message", "en", "Welcome to the Market Analysis Bot! Select a currency pair for analysis."),
+                        
+                        # access_request - запрос доступа
+                        ("access_request", "ru", "Ваша заявка на доступ отправлена администратору. Ожидайте подтверждения."),
+                        ("access_request", "tg", "Дархости шумо барои дастрасӣ ба маъмур фиристода шуд. Лутфан, тасдиқро интизор шавед."),
+                        ("access_request", "uz", "Kirish so'rovingiz administratorga yuborildi. Tasdiqlashni kuting."),
+                        ("access_request", "kk", "Кіру туралы өтінішіңіз әкімшіге жіберілді. Растауды күтіңіз."),
+                        ("access_request", "en", "Your access request has been sent to the administrator. Please wait for confirmation."),
+                        
+                        # access_granted - доступ предоставлен
+                        ("access_granted", "ru", "Ваша заявка одобрена! Теперь вы можете пользоваться ботом."),
+                        ("access_granted", "tg", "Дархости шумо тасдиқ карда шуд! Акнун шумо метавонед аз бот истифода баред."),
+                        ("access_granted", "uz", "So'rovingiz tasdiqlandi! Endi botdan foydalanishingiz mumkin."),
+                        ("access_granted", "kk", "Сіздің өтінішіңіз мақұлданды! Енді ботты пайдалана аласыз."),
+                        ("access_granted", "en", "Your request has been approved! You can now use the bot."),
+                        
+                        # access_denied - в доступе отказано
+                        ("access_denied", "ru", "Ваша заявка отклонена. Для получения дополнительной информации обратитесь к администратору @tradeporu."),
+                        ("access_denied", "tg", "Дархости шумо рад карда шуд. Барои маълумоти бештар, лутфан ба маъмур @tradeporu муроҷиат кунед."),
+                        ("access_denied", "uz", "So'rovingiz rad etildi. Qo'shimcha ma'lumot olish uchun @tradeporu administratoriga murojaat qiling."),
+                        ("access_denied", "kk", "Сіздің өтінішіңіз қабылданбады. Қосымша ақпарат алу үшін @tradeporu әкімшіге хабарласыңыз."),
+                        ("access_denied", "en", "Your request has been denied. Please contact administrator @tradeporu for more information."),
+                        
+                        # language_change - смена языка
+                        ("language_change", "ru", "Язык успешно изменен на русский."),
+                        ("language_change", "tg", "Забон бо муваффақият ба тоҷикӣ тағйир дода шуд."),
+                        ("language_change", "uz", "Til muvaffaqiyatli o'zbekchaga o'zgartirildi."),
+                        ("language_change", "kk", "Тіл қазақ тіліне сәтті өзгертілді."),
+                        ("language_change", "en", "Language successfully changed to English."),
+                        
+                        # admin_welcome - приветствие администратора
+                        ("admin_welcome", "ru", "Добро пожаловать в панель администратора!"),
+                        ("admin_welcome", "tg", "Хуш омадед ба панели администратор!"),
+                        ("admin_welcome", "uz", "Administrator paneliga xush kelibsiz!"),
+                        ("admin_welcome", "kk", "Әкімші панеліне қош келдіңіз!"),
+                        ("admin_welcome", "en", "Welcome to the administrator panel!")
+                    ]
+                    
+                    for msg in default_messages:
+                        cur.execute("""
+                            INSERT INTO bot_messages (message_key, language_code, message_text, updated_at)
+                            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                            ON CONFLICT (message_key, language_code) DO NOTHING
+                        """, msg)
+                    
+                    conn.commit()
+                    logger.info(f"Imported {len(default_messages)} default bot messages")
+                    return True
+                return False
+    except Exception as e:
+        logger.error(f"Error importing default bot messages: {e}")
+        return False
+
 # Import default data if needed
 import_default_currency_pairs()
+import_default_bot_messages()
