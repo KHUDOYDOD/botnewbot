@@ -617,7 +617,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await analyzing_message.edit_text(
                     text=result_message,
                     parse_mode='MarkdownV2',
-                    reply_markup=get_currency_keyboard(current_lang=lang_code)
+                    reply_markup=get_currency_keyboard(current_lang=lang_code, user_data=user_data)
                 )
 
         except Exception as e:
