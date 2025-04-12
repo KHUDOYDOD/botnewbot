@@ -2219,6 +2219,38 @@ def main():
                     )
                     return ADMIN_MENU
                 
+                about_text = (
+                    "ℹ️ О боте\n\n"
+                    "✨ *Trade Analysis Bot* ✨\n\n"
+                    "Версия: 2.0.0\n"
+                    "Разработан: Replit AI\n"
+                    "Лицензия: Proprietary\n\n"
+                    "📝 Описание:\n"
+                    "Профессиональный бот для анализа рынка "
+                    "с системой управления пользователями.\n\n"
+                    "🛠 Технологии:\n"
+                    "• Python 3.11\n"
+                    "• Python-telegram-bot\n"
+                    "• PostgreSQL\n"
+                    "• YFinance API\n\n"
+                    "📞 Контакты:\n"
+                    "Поддержка: @tradeporu\n"
+                )
+                
+                about_keyboard = [
+                    [InlineKeyboardButton("↩️ Назад", callback_data="admin_back")]
+                ]
+                
+                # Экранируем специальные символы для MarkdownV2
+                for char in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+                    about_text = about_text.replace(char, f"\\{char}")
+                
+                await query.edit_message_text(
+                    about_text,
+                    reply_markup=InlineKeyboardMarkup(about_keyboard),
+                    parse_mode='MarkdownV2'
+                )
+                return ADMIN_ABOUT
             async def admin_user_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 """Аналитика пользователей"""
                 query = update.callback_query
